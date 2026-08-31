@@ -1,91 +1,75 @@
-import os
+"""Particle definition and gravitational ("raining") deposition.
+
+Particles are generated on a loose, non-overlapping lattice in the upper part
+of the box.  When the solver starts they fall under gravity and compact into a
+dense random packing - this is the "raining" initialisation.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
 import numpy as np
-import matplotlib.pyplot as plt
+
+from .boundary import Box
 
 
+@dataclass
 class Particle:
-    def __init__(self, x, y, radius):
-        self.x = x
-        self.y = y
-        self.radius = radius
-        self.vx = 0.0
-        self.vy = 0.0
+    """A single circular particle (used to build the initial configuration)."""
 
-        self.ax = 0.0
-        self.ay = 0.0
+    x: float
+    y: float
+    radius: float
+    vx: float = 0.0
+    vy: float = 0.0
 
 
-class InitialiseParticles:
-    def __init__(self, box_size, radius_range=(0.05, 0.1), gravity=-9.81, seed=14):
-        self.box_size = box_size
-        self.radius_range = radius_range
-        self.gravity = gravity
-        np.random.seed(seed)
-        self.max_nb_iter = 50000
-        self.num_particles = []
-        self.particles = []
+def generate_rain_particles(box: Box, n_particles: int,
+                            radius_range: tuple[float, float] = (0.006, 0.012),
+                            seed: int = 0, spacing_factor: float = 1.15,
+                            jitter: float = 0.25) -> list[Particle]:
+    """Create ``n_particles`` on a loose lattice ready to rain down.
 
+    Parameters
+    ----------
+    box:
+        The container; particles are kept inside the left/right walls.
+    n_particles:
+        Number of particles to create.
+    radius_range:
+        ``(r_min, r_max)`` for the uniformly distributed radii.
+    seed:
+        Seed for the random generator (reproducible packings).
+    spacing_factor:
+        Lattice spacing as a multiple of the largest diameter.  Values > 1
+        guarantee that the initial configuration has no overlaps.
+    jitter:
+        Random in-cell displacement as a fraction of the free space, which
+        breaks the lattice symmetry and yields a more natural packing.
+    """
+    rng = np.random.default_rng(seed)
+    r_min, r_max = radius_range
+    d_max = 2.0 * r_max
+    spacing = d_max * spacing_factor
 
-    def initialize_particles(self):
+    # how many columns fit between the side walls
+    usable_width = box.width - d_max
+    n_cols = max(1, int(usable_width // spacing) + 1)
+    x0 = r_max
+    # maximum jitter that still cannot create an overlap
+    jitter_amp = jitter * 0.5 * (spacing - d_max)
 
-        nb_generated_particles = 0
-        nb_iterations = 0
+    particles: list[Particle] = []
+    for k in range(n_particles):
+        col = k % n_cols
+        row = k // n_cols
+        radius = float(rng.uniform(r_min, r_max))
+        x = x0 + col * spacing + float(rng.uniform(-jitter_amp, jitter_amp))
+        y = r_max + row * spacing + float(rng.uniform(-jitter_amp, jitter_amp))
+        # keep the particle between the side walls
+        x = min(max(x, radius), box.width - radius)
+        particles.append(Particle(x, y, radius))
 
-        # generate the particles position randomly
-        while nb_iterations <= self.max_nb_iter:
-            x = np.random.uniform(0, self.box_size[0])
-            y = np.random.uniform(0, self.box_size[1])
-            radius = np.random.uniform(self.radius_range[0], self.radius_range[1])
+    return particles
 
-            # Ensure the particle is within the box considering its radius
-            x = min(max(x, radius), self.box_size[0] - radius)
-            y = min(max(y, radius), self.box_size[1] - radius)
-
-            # Check for overlap with existing particles
-            overlap = False
-            for particle in self.particles:
-                distance = np.sqrt((x - particle.x) ** 2 + (y - particle.y) ** 2)
-                if distance < radius + particle.radius:
-                    overlap = True
-                    break
-
-            if overlap is False:
-                new_particle = Particle(x, y, radius)
-                self.particles.append(new_particle)
-                nb_generated_particles += 1
-            nb_iterations += 1
-        self.num_particles = nb_generated_particles
-        print(f"Number of particles generated: {self.num_particles}")
-
-        # initialise gravity
-        self.initialise_gravity()
-
-
-    def initialise_gravity(self):
-        for particle in self.particles:
-            particle.ay = self.gravity
-
-
-
-    def update_particles(self, dt):
-        for particle in self.particles:
-            particle.vx += particle.ax * dt
-            particle.vy += particle.ay * dt
-            particle.x += particle.vx * dt
-            particle.y += particle.vy * dt
-
-
-    def plot_particles(self, output_folder, time_step):
-
-        if os.path.isdir(output_folder) is False:
-            os.mkdir(output_folder)
-
-        fig, ax = plt.subplots()
-        ax.set_xlim(0, self.box_size[0])
-        ax.set_ylim(0, self.box_size[1])
-        for particle in self.particles:
-            circle = plt.Circle((particle.x, particle.y), particle.radius, color="b")
-            ax.add_artist(circle)
-        plt.gca().set_aspect("equal", adjustable="box")
-        plt.savefig(os.path.join(output_folder, f"{time_step}.png"))
-        plt.close()

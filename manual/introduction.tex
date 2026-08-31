@@ -1,0 +1,266 @@
+\chapter{Introduction}
+\label{cha:introduction}
+
+\section{Purpose of this document}
+\label{sec:purpose}
+
+This manual documents \texttt{DEMcookies}, a compact two-dimensional Discrete
+Element Model (DEM) written in Python.  The code simulates an assembly of
+circular, polydisperse particles that are first deposited into a rectangular
+container under gravity (\emph{raining} deposition) and subsequently compressed
+by a rigid loading platen that transmits a prescribed, time-dependent force.
+
+The document is intended to be self-contained: every equation that the code
+evaluates is stated explicitly, every numerical parameter is defined, and every
+algorithmic choice is justified.  The reader should be able to (i) reproduce the
+implementation from the equations alone, (ii) understand the meaning and the
+admissible range of each input parameter, and (iii) judge the accuracy and the
+limitations of the results.
+
+The manual is organised as follows.
+\begin{itemize}[leftmargin=1.6em]
+  \item Chapter~\ref{cha:introduction} introduces the discrete element method,
+        the physical problem, the notation and the structure of the package.
+  \item Chapter~\ref{cha:formulation} develops the complete mathematical
+        formulation: kinematics, the Newton--Euler equations of motion, the
+        Hertz--Mindlin contact law, boundary conditions and the platen
+        sub-system.
+  \item Chapter~\ref{cha:numerical} describes the numerical solution: time
+        integration, stability, contact detection, history bookkeeping,
+        deposition algorithm and computational complexity.
+  \item Chapter~\ref{cha:examples} presents verification tests with analytical
+        reference solutions and a full application example.
+\end{itemize}
+
+\section{The discrete element method}
+\label{sec:dem}
+
+The discrete element method, introduced by Cundall and Strack for granular
+assemblies~\cite{cundall1979}, treats a granular material as a large collection
+of individual rigid bodies whose motion is governed by Newton's second law.  The
+particles interact only through contacts.  Two families of formulations exist:
+
+\begin{description}[leftmargin=1.6em,style=nextline]
+  \item[Hard-sphere (event-driven) methods] Particles are perfectly rigid,
+        collisions are instantaneous, and the simulation advances from collision
+        event to collision event.  These methods are efficient for dilute,
+        rapidly flowing systems but cannot represent enduring, multi-body
+        contacts.
+  \item[Soft-sphere (time-driven) methods] Particles are allowed to overlap
+        slightly; the overlap is interpreted as the local elastic deformation of
+        the contact region, and a constitutive law converts it into a contact
+        force.  The equations of motion are integrated with a small, fixed time
+        step.
+\end{description}
+
+\texttt{DEMcookies} is a soft-sphere code.  The soft-sphere paradigm is the
+standard choice for dense, quasi-static problems such as the confined
+compression considered here, because it naturally handles persistent contacts,
+force chains and static equilibrium~\cite{osullivan2011,zhu2007}.
+
+The soft-sphere DEM cycle repeated at every time step is:
+\begin{enumerate}[leftmargin=2.2em]
+  \item \textbf{Contact detection.}  Find all pairs of bodies whose surfaces
+        overlap (broad phase followed by a narrow, exact geometric test).
+  \item \textbf{Force evaluation.}  For each contact, compute the normal and
+        tangential forces from the overlap, the relative surface velocity and
+        the accumulated tangential displacement; add gravity.
+  \item \textbf{Integration.}  Advance translational and rotational degrees of
+        freedom with an explicit integrator.
+\end{enumerate}
+
+\section{The physical problem}
+\label{sec:problem}
+
+\begin{figure}[htbp]
+  \centering
+  \setlength{\unitlength}{1mm}
+  \begin{picture}(90,62)
+    % container
+    \put(25,5){\line(1,0){40}}          % bottom wall
+    \put(25,5){\line(0,1){50}}          % left wall
+    \put(65,5){\line(0,1){50}}          % right wall
+    % platen
+    \linethickness{1.2pt}
+    \put(25,40){\line(1,0){40}}
+    \linethickness{0.4pt}
+    % load arrow
+    \put(45,52){\vector(0,-1){11}}
+    \put(47,47){$F(t)$}
+    % particles (schematic)
+    \put(30,9){\circle{7}}   \put(38,8){\circle{5}}   \put(45,10){\circle{8}}
+    \put(54,8){\circle{5}}   \put(61,9){\circle{6}}
+    \put(31,16){\circle{6}}  \put(39,15){\circle{7}}  \put(48,17){\circle{5}}
+    \put(56,16){\circle{7}}  \put(62,15){\circle{4}}
+    \put(29,23){\circle{5}}  \put(36,23){\circle{6}}  \put(44,24){\circle{7}}
+    \put(52,23){\circle{5}}  \put(60,23){\circle{7}}
+    \put(31,30){\circle{7}}  \put(40,31){\circle{6}}  \put(48,30){\circle{7}}
+    \put(57,31){\circle{6}}  \put(63,30){\circle{4}}
+    \put(30,36){\circle{5}}  \put(38,37){\circle{6}}  \put(46,36){\circle{5}}
+    \put(54,37){\circle{6}}  \put(61,36){\circle{5}}
+    % dimensions
+    \put(25,60){\vector(1,0){40}}
+    \put(65,60){\vector(-1,0){40}}
+    \put(43,62){$B$}
+    \put(20,5){\vector(0,1){50}}
+    \put(20,55){\vector(0,-1){50}}
+    \put(14,29){$L$}
+    % axes
+    \put(8,5){\vector(1,0){9}}  \put(18,4){$x$}
+    \put(8,5){\vector(0,1){9}}  \put(6,15){$y$}
+    % gravity
+    \put(76,45){\vector(0,-1){12}} \put(78,38){$g$}
+  \end{picture}
+  \caption{Model problem: a rectangular container of width $B$ and height $L$
+  with fixed left, right and bottom walls.  Polydisperse circular particles are
+  rained in under gravity; a rigid platen then closes the top and transmits the
+  prescribed load $F(t)$.}
+  \label{fig:problem}
+\end{figure}
+
+The reference problem solved by the package (Figure~\ref{fig:problem}) consists
+of two consecutive stages.
+
+\paragraph{Stage 1 -- gravitational deposition.}
+An initially empty box of width $B$ and height $L$, with fixed walls at $x=0$,
+$x=B$ and $y=0$, is filled by repeatedly inserting small batches of
+non-overlapping particles in a thin band just below the top of the domain.  The
+particles fall under gravity, collide, dissipate energy and build a dense random
+packing.  Insertion continues until the growing bed reaches the insertion band,
+after which the assembly is allowed to relax until its mean kinetic energy falls
+below a quiescence tolerance.  This procedure is the numerical analogue of
+pluviation (sand raining) used in laboratory sample preparation.
+
+\paragraph{Stage 2 -- confined compression.}
+A rigid, massive platen spanning the full width $B$ is placed on top of the
+settled bed.  The platen is constrained to move vertically only and obeys its
+own equation of motion, driven by the reaction of the particles below and by an
+externally prescribed load $F(t)$.  Because the lateral walls are rigid and
+fixed, the test is an \emph{oedometric} (one-dimensional, laterally confined)
+compression.  The recorded platen displacement and reaction force yield the
+macroscopic load--displacement response of the packing.
+
+\section{Structure of the package}
+\label{sec:structure}
+
+The package is deliberately small; each module maps onto one section of this
+manual (Table~\ref{tab:modules}).
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \caption{Modules of \texttt{DEMcookies} and the corresponding sections.}
+  \label{tab:modules}
+  \begin{tabular}{lp{4.9cm}p{4.3cm}}
+    \toprule
+    Module & Main contents & Documented in \\
+    \midrule
+    \texttt{contact.py} &
+      \texttt{MaterialProperties}, \texttt{HertzMindlinModel},
+      \texttt{rayleigh\_time\_step} &
+      Sections~\ref{sec:normal}--\ref{sec:tangential},
+      Section~\ref{sec:timestep} \\
+    \texttt{boundary.py} &
+      \texttt{Box}, \texttt{LoadingPlaten}, \texttt{linear\_ramp} &
+      Sections~\ref{sec:walls}--\ref{sec:platen} \\
+    \texttt{particle\_generation.py} &
+      \texttt{Particle}, \texttt{generate\_rain\_particles} &
+      Section~\ref{sec:deposition} \\
+    \texttt{solver.py} &
+      \texttt{VelocityVerlet}, \texttt{DEMSimulation} &
+      Chapter~\ref{cha:numerical} \\
+    \texttt{main.py} &
+      driver script, animation, load curve &
+      Chapter~\ref{cha:examples} \\
+    \texttt{tests/test\_solver.py} &
+      unit verification tests &
+      Section~\ref{sec:unit-tests} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Modelling assumptions}
+\label{sec:assumptions}
+
+The following assumptions are built into the formulation and should be kept in
+mind when interpreting results.
+
+\begin{enumerate}[leftmargin=2.2em,label=A\arabic*.]
+  \item \textbf{Two-dimensional kinematics.}  Motion is restricted to the
+        $x$--$y$ plane.  Each particle has three degrees of freedom: two
+        translations and one rotation about the out-of-plane axis.
+  \item \textbf{Spherical mass properties.}  Although the geometry is a disc,
+        the mass and the moment of inertia are those of a \emph{sphere},
+        $m=\tfrac{4}{3}\pi\rho R^{3}$ and $I=\tfrac{2}{5}mR^{2}$.  The model is
+        therefore best interpreted as a planar arrangement of spheres rather
+        than as a plane-strain slice of a cylinder
+        (see Section~\ref{sec:massprops}).
+  \item \textbf{Single material.}  All particles and all boundaries share the
+        same density, Young's modulus, Poisson ratio, restitution coefficient
+        and friction coefficient.  The effective contact constants $E^{*}$,
+        $G^{*}$, $\beta$ and $\mu$ are therefore evaluated once at construction
+        time.
+  \item \textbf{Small overlaps.}  The Hertz--Mindlin law is a small-strain
+        elastic solution.  It is quantitatively valid only while the overlap
+        remains a small fraction of the particle radius
+        (Section~\ref{sec:limitations}).
+  \item \textbf{No cohesion, no rolling resistance.}  Contacts transmit only
+        compression, viscous damping and Coulomb friction.  Adhesive forces,
+        liquid bridges, rolling friction and particle breakage are not modelled.
+  \item \textbf{Dry system.}  There is no interstitial fluid: no drag, no
+        buoyancy, no pore pressure.
+  \item \textbf{Rigid boundaries.}  Walls are perfectly rigid, flat half-spaces
+        of infinite mass and infinite radius; the platen is rigid but has a
+        finite mass and one translational degree of freedom.
+\end{enumerate}
+
+\section{Notation}
+\label{sec:notation}
+
+Vectors are set in bold, $\mathbf{a}=(a_{x},a_{y})$.  Because the model is
+planar, angular quantities are scalars measuring the out-of-plane
+($z$) component, and the cross product of two in-plane vectors is the scalar
+$(\mathbf{a}\times\mathbf{b})_{z}=a_{x}b_{y}-a_{y}b_{x}$.
+Table~\ref{tab:notation} collects the symbols used throughout the manual.
+
+\begin{table}[htbp]
+  \centering
+  \small
+  \caption{Notation.}
+  \label{tab:notation}
+  \begin{tabular}{llll}
+    \toprule
+    Symbol & Meaning & Unit & Code name \\
+    \midrule
+    $N$              & number of particles              & --                   & \texttt{sim.n} \\
+    $B,\ L$          & box width and height             & \unit{\metre}        & \texttt{box.width}, \texttt{box.height} \\
+    $\mathbf{x}_{i}$ & particle centre                  & \unit{\metre}        & \texttt{pos[i]} \\
+    $\mathbf{v}_{i}$ & particle velocity                & \unit{\metre\per\second} & \texttt{vel[i]} \\
+    $\omega_{i}$     & angular velocity ($z$)           & \unit{\radian\per\second} & \texttt{omega[i]} \\
+    $R_{i}$          & particle radius                  & \unit{\metre}        & \texttt{radius[i]} \\
+    $m_{i}$          & particle mass                    & \unit{\kilogram}     & \texttt{mass[i]} \\
+    $I_{i}$          & moment of inertia                & \unit{\kilogram\metre\squared} & \texttt{inertia[i]} \\
+    $\rho$           & material density                 & \unit{\kilogram\per\cubic\metre} & \texttt{density} \\
+    $E$              & Young's modulus                  & \unit{\pascal}       & \texttt{youngs\_modulus} \\
+    $\nu$            & Poisson ratio                    & --                   & \texttt{poisson\_ratio} \\
+    $G$              & shear modulus                    & \unit{\pascal}       & \texttt{shear\_modulus} \\
+    $E^{*},\ G^{*}$  & effective contact moduli         & \unit{\pascal}       & \texttt{e\_star}, \texttt{g\_star} \\
+    $e$              & coefficient of restitution       & --                   & \texttt{restitution} \\
+    $\beta$          & damping ratio derived from $e$   & --                   & \texttt{beta} \\
+    $\mu$            & Coulomb friction coefficient     & --                   & \texttt{mu} \\
+    $g$              & gravitational acceleration       & \unit{\metre\per\second\squared} & \texttt{gravity} \\
+    $\delta_{n}$     & normal overlap                   & \unit{\metre}        & \texttt{delta} \\
+    $\mathbf{n},\ \mathbf{t}$ & contact normal and tangent & --                 & \texttt{nx,ny}, \texttt{tpx,tpy} \\
+    $R^{*},\ m^{*}$  & effective radius and mass        & \unit{\metre}, \unit{\kilogram} & \texttt{r\_eff}, \texttt{m\_eff} \\
+    $S_{n},\ S_{t}$  & normal, tangential stiffness     & \unit{\newton\per\metre} & \texttt{s\_n}, \texttt{s\_t} \\
+    $\boldsymbol{\xi}$ & tangential displacement        & \unit{\metre}        & \texttt{xi\_x, xi\_y} \\
+    $\mathbf{F}_{n},\ \mathbf{F}_{t}$ & contact force components & \unit{\newton} & \texttt{f\_n}, \texttt{ftx,fty} \\
+    $T_{i}$          & torque on particle $i$           & \unit{\newton\metre} & \texttt{torque[i]} \\
+    $y_{p},\ v_{p}$  & platen position and velocity     & \unit{\metre}, \unit{\metre\per\second} & \texttt{platen.y}, \texttt{platen.vy} \\
+    $m_{p}$          & platen mass                      & \unit{\kilogram}     & \texttt{platen.mass} \\
+    $F(t)$           & prescribed external load         & \unit{\newton}       & \texttt{load\_fn} \\
+    $\Delta t$       & time step                        & \unit{\second}       & \texttt{sim.dt} \\
+    $T_{R}$          & Rayleigh critical time step      & \unit{\second}       & \texttt{rayleigh\_time\_step} \\
+    \bottomrule
+  \end{tabular}
+\end{table}

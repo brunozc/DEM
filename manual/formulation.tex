@@ -1,0 +1,629 @@
+\chapter{Mathematical formulation}
+\label{cha:formulation}
+
+This chapter states the complete continuous model that \texttt{DEMcookies}
+discretises: the degrees of freedom and their mass properties, the Newton--Euler
+equations of motion, the contact kinematics, the Hertz--Mindlin constitutive law
+with viscous dissipation and Coulomb friction, and the boundary conditions
+imposed by the walls and by the loading platen.
+
+\section{Degrees of freedom and kinematics}
+\label{sec:kinematics}
+
+The assembly consists of $N$ circular particles.  Particle $i$ is fully
+described by its radius $R_{i}$ and by the state vector
+\begin{equation}
+  \mathbf{q}_{i}
+  = \bigl(x_{i},\, y_{i},\, \theta_{i}\bigr)^{\mathsf{T}},
+  \qquad i = 1,\dots,N,
+  \label{eq:dofs}
+\end{equation}
+i.e.\ two translations of the centre $\mathbf{x}_{i}=(x_{i},y_{i})$ and one
+rotation $\theta_{i}$ about the out-of-plane axis $\mathbf{e}_{z}$.  The
+corresponding velocities are $\mathbf{v}_{i}=\dot{\mathbf{x}}_{i}$ and
+$\omega_{i}=\dot{\theta}_{i}$.  The rotation angle itself never enters the
+constitutive law -- only $\omega_{i}$ does -- and is therefore not stored by
+the code.
+
+The radii are drawn from a uniform distribution,
+\begin{equation}
+  R_{i} \sim \mathcal{U}(R_{\min},R_{\max}),
+  \label{eq:radii}
+\end{equation}
+so the assembly is polydisperse.  Polydispersity is essential: a monodisperse
+two-dimensional assembly crystallises into a hexagonal lattice whose mechanical
+response is strongly anisotropic and unrepresentative of a granular material.
+
+\section{Mass properties}
+\label{sec:massprops}
+
+The mass and the polar moment of inertia used by the code are those of a
+\emph{sphere} of radius $R_{i}$:
+\begin{equation}
+  m_{i} = \frac{4}{3}\pi\rho R_{i}^{3},
+  \qquad
+  I_{i} = \frac{2}{5} m_{i} R_{i}^{2}
+        = \frac{8}{15}\pi\rho R_{i}^{5}.
+  \label{eq:massprops}
+\end{equation}
+This is a deliberate modelling choice.  A genuine two-dimensional disc of unit
+thickness would have $m_{i}=\pi\rho R_{i}^{2}$ and $I_{i}=\tfrac{1}{2}m_{i}R_{i}^{2}$.
+Using~\eqref{eq:massprops} together with the Hertzian sphere--sphere contact law
+of Section~\ref{sec:normal} keeps the \emph{ratio} of inertia to contact
+stiffness consistent with a three-dimensional grain, so that collision times,
+restitution and the Rayleigh time step retain their physical meaning.  The
+assembly should therefore be read as a planar arrangement of spheres, not as a
+plane-strain slice through cylinders.  The practical consequence is that the
+mass ratio between the smallest and the largest grain scales as
+$(R_{\max}/R_{\min})^{3}$ rather than $(R_{\max}/R_{\min})^{2}$.
+
+\section{Equations of motion}
+\label{sec:eom}
+
+Let $\mathcal{C}_{i}$ be the set of particles in contact with $i$ and
+$\mathcal{W}_{i}$ the set of boundaries (walls and platen) in contact with $i$.
+The Newton--Euler equations are
+\begin{align}
+  m_{i}\,\ddot{\mathbf{x}}_{i}
+    &= \sum_{j\in\mathcal{C}_{i}} \mathbf{F}_{ij}
+     + \sum_{w\in\mathcal{W}_{i}} \mathbf{F}_{iw}
+     + m_{i}\,\mathbf{g},
+     \label{eq:newton}\\[2pt]
+  I_{i}\,\dot{\omega}_{i}
+    &= \sum_{j\in\mathcal{C}_{i}} T_{ij}
+     + \sum_{w\in\mathcal{W}_{i}} T_{iw},
+     \label{eq:euler}
+\end{align}
+with the body force $\mathbf{g}=-g\,\mathbf{e}_{y}$.  No damping other than the
+contact dissipation of Sections~\ref{sec:normal-damping}
+and~\ref{sec:tangential} is applied: a particle in flight is a free projectile.
+
+Newton's third law is enforced pairwise,
+$\mathbf{F}_{ji}=-\mathbf{F}_{ij}$, so that linear momentum is conserved exactly
+by the force evaluation; angular momentum is likewise conserved because the
+torques are computed from the same tangential force acting at the same contact
+point on both bodies (Section~\ref{sec:torque}).
+
+\section{Contact kinematics}
+\label{sec:contact-kinematics}
+
+\subsection{Overlap and local frame}
+
+Two particles $i$ and $j$ are in contact when their circles intersect.  With
+\begin{equation}
+  \mathbf{d}_{ij} = \mathbf{x}_{i}-\mathbf{x}_{j},
+  \qquad
+  d_{ij} = \lVert \mathbf{d}_{ij}\rVert,
+\end{equation}
+the \emph{normal overlap} (or interpenetration) is
+\begin{equation}
+  \boxed{\;\delta_{n} = R_{i}+R_{j}-d_{ij}\;}
+  \qquad\text{contact}\iff \delta_{n}>0 .
+  \label{eq:overlap}
+\end{equation}
+The local orthonormal frame is
+\begin{equation}
+  \mathbf{n} = \frac{\mathbf{d}_{ij}}{d_{ij}} = (n_{x},n_{y}),
+  \qquad
+  \mathbf{t} = \mathbf{e}_{z}\times\mathbf{n} = (-n_{y},\,n_{x}),
+  \label{eq:frame}
+\end{equation}
+where $\mathbf{n}$ points from $j$ towards $i$, i.e.\ in the direction in which
+$i$ is pushed away.  In the soft-sphere paradigm $\delta_{n}$ is not a geometric
+artefact but the physical approach of the two centres caused by the elastic
+flattening of the contact region.
+
+The lever arm from the centre of $i$ to the contact point is taken as
+$-R_{i}\mathbf{n}$ (and $+R_{j}\mathbf{n}$ for $j$), i.e.\ the undeformed
+surface point.  The error introduced by neglecting the $\delta_{n}/2$ correction
+is of the same order as the overlap itself and is negligible whenever the model
+is used within its range of validity.
+
+\subsection{Relative surface velocity}
+
+The velocity of the material point of $i$ at the contact is
+$\mathbf{v}_{i}+\omega_{i}\mathbf{e}_{z}\times(-R_{i}\mathbf{n})
+ = \mathbf{v}_{i}-R_{i}\omega_{i}\mathbf{t}$, and similarly for $j$.  The
+relative surface velocity of $i$ with respect to $j$ is therefore
+\begin{equation}
+  \boxed{\;
+  \mathbf{v}_{ij}
+  = (\mathbf{v}_{i}-\mathbf{v}_{j})
+    - \bigl(R_{i}\omega_{i}+R_{j}\omega_{j}\bigr)\,\mathbf{t}\;}
+  \label{eq:vrel}
+\end{equation}
+Note the \emph{sum} of the two spin contributions: both particles rotating in
+the same sense produce sliding of the same sign at the contact.  Decomposing
+into the local frame,
+\begin{equation}
+  v_{n} = \mathbf{v}_{ij}\cdot\mathbf{n},
+  \qquad
+  \mathbf{v}_{t} = \mathbf{v}_{ij} - v_{n}\mathbf{n},
+  \label{eq:vn-vt}
+\end{equation}
+with the sign convention $v_{n}<0$ during approach (loading) and $v_{n}>0$
+during separation (unloading).
+
+\subsection{Effective contact quantities}
+
+Two bodies in contact are replaced by an equivalent sphere--plane problem
+through the effective radius and effective mass,
+\begin{equation}
+  \frac{1}{R^{*}} = \frac{1}{R_{i}} + \frac{1}{R_{j}}
+  \;\Longrightarrow\;
+  R^{*}=\frac{R_{i}R_{j}}{R_{i}+R_{j}},
+  \qquad
+  \frac{1}{m^{*}} = \frac{1}{m_{i}} + \frac{1}{m_{j}}
+  \;\Longrightarrow\;
+  m^{*}=\frac{m_{i}m_{j}}{m_{i}+m_{j}} .
+  \label{eq:effective}
+\end{equation}
+The effective elastic moduli follow from the Hertz and Mindlin
+solutions~\cite{johnson1985},
+\begin{equation}
+  \frac{1}{E^{*}} = \frac{1-\nu_{i}^{2}}{E_{i}} + \frac{1-\nu_{j}^{2}}{E_{j}},
+  \qquad
+  \frac{1}{G^{*}} = \frac{2-\nu_{i}}{G_{i}} + \frac{2-\nu_{j}}{G_{j}} ,
+  \label{eq:moduli-general}
+\end{equation}
+which, for the single material assumed here ($E_{i}=E_{j}=E$,
+$\nu_{i}=\nu_{j}=\nu$), reduce to the constants evaluated once at
+construction time:
+\begin{equation}
+  \boxed{\;
+  E^{*} = \frac{E}{2\,(1-\nu^{2})},
+  \qquad
+  G^{*} = \frac{G}{2\,(2-\nu)},
+  \qquad
+  G = \frac{E}{2(1+\nu)} \;}
+  \label{eq:moduli}
+\end{equation}
+
+\section{Normal contact: the Hertz law}
+\label{sec:normal}
+
+\subsection{Elastic force}
+
+For two frictionless elastic spheres pressed together by an approach
+$\delta_{n}$, Hertz's solution~\cite{hertz1882,johnson1985} gives a circular
+contact patch of radius
+\begin{equation}
+  a = \sqrt{R^{*}\delta_{n}},
+  \label{eq:contact-radius}
+\end{equation}
+a semi-elliptical pressure distribution
+$p(r)=p_{0}\sqrt{1-r^{2}/a^{2}}$ with $p_{0}=3F_{n}/(2\pi a^{2})$, and the
+non-linear force--displacement relation
+\begin{equation}
+  \boxed{\;
+  F_{n}^{\mathrm{e}}
+  = \frac{4}{3}\,E^{*}\sqrt{R^{*}}\;\delta_{n}^{3/2}
+  = k_{n}\,\delta_{n}^{3/2},
+  \qquad
+  k_{n} \equiv \frac{4}{3}E^{*}\sqrt{R^{*}} \;}
+  \label{eq:hertz}
+\end{equation}
+The stiffening exponent $3/2$ reflects the growth of the contact area with
+load; it is the single most important qualitative difference with respect to
+linear (Cundall--Strack) spring models.  Differentiating~\eqref{eq:hertz} gives
+the \emph{tangent} normal stiffness, which is the quantity that controls both the
+damping coefficient and the numerical stability:
+\begin{equation}
+  S_{n} = \frac{\partial F_{n}^{\mathrm{e}}}{\partial \delta_{n}}
+        = 2\,E^{*}\sqrt{R^{*}\delta_{n}}
+        = 2\,E^{*}a .
+  \label{eq:Sn}
+\end{equation}
+
+\subsection{Viscous dissipation}
+\label{sec:normal-damping}
+
+Real collisions dissipate energy.  Following Tsuji \emph{et
+al.}~\cite{tsuji1992}, a dashpot whose coefficient scales with the instantaneous
+Hertzian stiffness is added in parallel with the spring,
+\begin{equation}
+  F_{n}^{\mathrm{d}} = -\,c_{n}\,v_{n},
+  \qquad
+  \boxed{\;c_{n} = 2\sqrt{\tfrac{5}{6}}\;\beta\;\sqrt{S_{n}\,m^{*}}\;}
+  \label{eq:cn}
+\end{equation}
+where $2\sqrt{S_{n}m^{*}}$ is the critical damping of the equivalent
+single-degree-of-freedom oscillator and $\sqrt{5/6}\,\beta$ is the damping
+ratio.  The dimensionless factor $\beta$ is obtained by matching the
+coefficient of restitution $e$ of the equivalent linear oscillator,
+\begin{equation}
+  e = \exp\!\left(\frac{-\pi\zeta}{\sqrt{1-\zeta^{2}}}\right)
+  \;\Longleftrightarrow\;
+  \boxed{\;
+  \beta = \frac{\lvert \ln e\rvert}{\sqrt{\ln^{2}e+\pi^{2}}}\;}
+  \label{eq:beta}
+\end{equation}
+Limiting cases: $e\to1$ gives $\beta\to0$ (elastic, non-dissipative contact),
+while $e\to0$ gives $\beta\to1$ (fully plastic collision).  The implementation
+clips $e$ to $[10^{-4},1]$ so that~\eqref{eq:beta} is always well defined.
+
+The total normal force is the sum of the two contributions, truncated at zero
+because the model is cohesionless:
+\begin{equation}
+  \boxed{\;
+  F_{n} = \max\!\Bigl(0,\;
+          k_{n}\delta_{n}^{3/2} - c_{n} v_{n}\Bigr) \;}
+  \label{eq:Fn}
+\end{equation}
+The truncation is physically necessary: at the very end of a collision the
+elastic term vanishes faster than the damping term, and without the cut-off the
+dashpot would pull the separating particles back together (spurious attraction)
+and could even prevent detachment~\cite{direnzo2004}.
+
+\section{Tangential contact: Mindlin spring with Coulomb limit}
+\label{sec:tangential}
+
+\subsection{Tangential stiffness}
+
+The Mindlin no-slip solution~\cite{mindlin1949,mindlin1953} for two spheres
+pressed together and then sheared gives the tangential stiffness
+\begin{equation}
+  \boxed{\;S_{t} = 8\,G^{*}\sqrt{R^{*}\delta_{n}} = 8\,G^{*}a\;}
+  \label{eq:St}
+\end{equation}
+Like $S_{n}$, it depends on the current overlap: a contact that is more strongly
+compressed is also stiffer in shear.  Their ratio is a constant of the material,
+\begin{equation}
+  \frac{S_{t}}{S_{n}} = \frac{4G^{*}}{E^{*}}
+  = \frac{4\,\dfrac{E}{2(1+\nu)}\dfrac{1}{2(2-\nu)}}
+         {\dfrac{E}{2(1-\nu^{2})}}
+  = \frac{2(1-\nu)}{2-\nu} ,
+\end{equation}
+which equals $0.857$ for $\nu=0.25$.
+
+\subsection{Tangential history}
+
+Friction is path dependent, so the tangential force cannot be a function of the
+instantaneous state alone.  A tangential spring $\boldsymbol{\xi}$ -- the
+accumulated relative tangential displacement since the contact was created -- is
+stored for every contact and updated incrementally.  Two operations are applied
+in sequence at each evaluation.
+
+\paragraph{(i) Rotation of the contact plane.}  Between two evaluations the
+normal $\mathbf{n}$ changes direction, so the stored spring may acquire a
+component along the new normal.  It is removed by projection onto the current
+tangent plane,
+\begin{equation}
+  \boldsymbol{\xi} \;\leftarrow\;
+  \boldsymbol{\xi} - (\boldsymbol{\xi}\cdot\mathbf{n})\,\mathbf{n} .
+  \label{eq:xi-project}
+\end{equation}
+This is the standard first-order treatment~\cite{silbert2001}; it keeps the
+spring admissible without rotating its magnitude, and the associated error is
+$O(\Delta t^{2})$ per step.
+
+\paragraph{(ii) Incremental accumulation.}  The spring is then extended by the
+tangential relative displacement accumulated over the step,
+\begin{equation}
+  \boldsymbol{\xi} \;\leftarrow\;
+  \boldsymbol{\xi} + \mathbf{v}_{t}\,\Delta t .
+  \label{eq:xi-accumulate}
+\end{equation}
+A contact that closes for the first time starts from
+$\boldsymbol{\xi}=\mathbf{0}$; a contact that opens is deleted together with its
+history, so that re-closing later starts again from zero.
+
+\subsection{Trial force and Coulomb return mapping}
+
+The trial tangential force combines the Mindlin spring with a dashpot built on
+the tangential stiffness in exactly the same way as~\eqref{eq:cn},
+\begin{equation}
+  \mathbf{F}_{t}^{\mathrm{trial}}
+  = -\,S_{t}\,\boldsymbol{\xi} - c_{t}\,\mathbf{v}_{t},
+  \qquad
+  c_{t} = 2\sqrt{\tfrac{5}{6}}\;\beta\;\sqrt{S_{t}\,m^{*}} .
+  \label{eq:Ft-trial}
+\end{equation}
+Sliding is then enforced through the Coulomb criterion.  If the trial force
+violates the friction cone it is scaled back onto it, and -- crucially -- the
+stored spring is reset so that it remains consistent with the force actually
+transmitted:
+\begin{equation}
+  \boxed{\;
+  \begin{aligned}
+    &\text{if } \lVert \mathbf{F}_{t}^{\mathrm{trial}}\rVert \le \mu F_{n}:
+      &&\mathbf{F}_{t} = \mathbf{F}_{t}^{\mathrm{trial}}
+        &&\text{(stick)}\\[2pt]
+    &\text{if } \lVert \mathbf{F}_{t}^{\mathrm{trial}}\rVert > \mu F_{n}:
+      &&\mathbf{F}_{t}
+        = \mu F_{n}\,
+          \frac{\mathbf{F}_{t}^{\mathrm{trial}}}
+               {\lVert \mathbf{F}_{t}^{\mathrm{trial}}\rVert},
+      \quad
+      \boldsymbol{\xi} = -\frac{\mathbf{F}_{t}}{S_{t}}
+        &&\text{(slip)}
+  \end{aligned}\;}
+  \label{eq:coulomb}
+\end{equation}
+The structure is identical to the radial return mapping of computational
+plasticity: the spring plays the role of the elastic strain, the friction cone
+of the yield surface, and the reset of $\boldsymbol{\xi}$ of the plastic
+corrector.  Without the reset the spring would keep growing during prolonged
+sliding and would produce a spurious force spike on reversal.
+
+Two properties of~\eqref{eq:coulomb} are worth noting.  First, because the reset
+uses only the spring term, the damping contribution is discarded during sliding
+and the transmitted force is exactly $\mu F_{n}$.  Second, since $F_{n}=0$
+implies $\mathbf{F}_{t}=\mathbf{0}$, a contact that is closing with negligible
+compression transmits no shear.
+
+\section{Contact force and torque}
+\label{sec:torque}
+
+The total force exerted by $j$ on $i$ and its reaction are
+\begin{equation}
+  \mathbf{F}_{ij} = F_{n}\,\mathbf{n} + \mathbf{F}_{t},
+  \qquad
+  \mathbf{F}_{ji} = -\mathbf{F}_{ij}.
+  \label{eq:Fij}
+\end{equation}
+Only the tangential part produces a moment about the particle centres.  With the
+lever arms $-R_{i}\mathbf{n}$ and $+R_{j}\mathbf{n}$,
+\begin{align}
+  T_{ij} &= \bigl[(-R_{i}\mathbf{n})\times\mathbf{F}_{t}\bigr]_{z}
+          = -R_{i}\,\bigl(n_{x}F_{ty}-n_{y}F_{tx}\bigr),
+          \label{eq:Ti}\\
+  T_{ji} &= \bigl[(+R_{j}\mathbf{n})\times(-\mathbf{F}_{t})\bigr]_{z}
+          = -R_{j}\,\bigl(n_{x}F_{ty}-n_{y}F_{tx}\bigr).
+          \label{eq:Tj}
+\end{align}
+Both torques carry the same sign, which is the expected behaviour: friction at
+a contact spins the two grains in the same sense, like two meshing gears rolling
+on each other.  Because $\mathbf{F}_{t}$ is parallel to $\mathbf{t}$, the common
+factor simplifies to the signed tangential force,
+\begin{equation}
+  n_{x}F_{ty}-n_{y}F_{tx} = \mathbf{F}_{t}\cdot\mathbf{t}
+  \qquad\Longrightarrow\qquad
+  T_{ij} = -R_{i}\,(\mathbf{F}_{t}\cdot\mathbf{t}),
+  \quad
+  T_{ji} = -R_{j}\,(\mathbf{F}_{t}\cdot\mathbf{t}).
+\end{equation}
+No rolling resistance is added, so a lone particle on a flat wall keeps spinning
+indefinitely once it has been set into rotation.
+
+\section{Summary of the contact law}
+\label{sec:contact-summary}
+
+Given $(\mathbf{n},\delta_{n},\mathbf{v}_{ij},\boldsymbol{\xi},\Delta t,
+R^{*},m^{*})$, one evaluation of the constitutive law proceeds as follows.
+
+\begin{enumerate}[leftmargin=2.4em,label=\textbf{\arabic*.}]
+  \item If $\delta_{n}\le0$: return zero force and $\boldsymbol{\xi}=\mathbf{0}$.
+  \item Contact radius and stiffnesses:
+        $a=\sqrt{R^{*}\delta_{n}}$, $S_{n}=2E^{*}a$, $S_{t}=8G^{*}a$,
+        $k_{n}=\tfrac{4}{3}E^{*}\sqrt{R^{*}}$.
+  \item Normal: $v_{n}=\mathbf{v}_{ij}\cdot\mathbf{n}$,
+        $c_{n}=2\sqrt{5/6}\,\beta\sqrt{S_{n}m^{*}}$,
+        $F_{n}=\max(0,\ k_{n}\delta_{n}^{3/2}-c_{n}v_{n})$.
+  \item Tangential kinematics: $\mathbf{v}_{t}=\mathbf{v}_{ij}-v_{n}\mathbf{n}$.
+  \item History: project $\boldsymbol{\xi}$ with~\eqref{eq:xi-project}, then
+        accumulate with~\eqref{eq:xi-accumulate}.
+  \item Trial force~\eqref{eq:Ft-trial} and Coulomb
+        correction~\eqref{eq:coulomb}.
+  \item Assemble $\mathbf{F}=F_{n}\mathbf{n}+\mathbf{F}_{t}$ and return
+        $\mathbf{F}$, $\mathbf{F}_{t}$ and the updated $\boldsymbol{\xi}$.
+\end{enumerate}
+
+Table~\ref{tab:constants} lists the derived constants for the material used in
+the reference simulation of Chapter~\ref{cha:examples}.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Material input and derived contact constants for the reference
+  simulation.}
+  \label{tab:constants}
+  \begin{tabular}{llS[table-format=1.4e2]l}
+    \toprule
+    Symbol & Quantity & {Value} & Unit \\
+    \midrule
+    $\rho$   & density                        & 2.5000e3  & \unit{\kilogram\per\cubic\metre} \\
+    $E$      & Young's modulus                & 5.0000e6  & \unit{\pascal} \\
+    $\nu$    & Poisson ratio                  & 2.5000e-1 & -- \\
+    $e$      & coefficient of restitution     & 4.0000e-1 & -- \\
+    $\mu$    & friction coefficient           & 5.0000e-1 & -- \\
+    \midrule
+    $G$      & shear modulus, Eq.~\eqref{eq:moduli}      & 2.0000e6 & \unit{\pascal} \\
+    $E^{*}$  & effective normal modulus                  & 2.6667e6 & \unit{\pascal} \\
+    $G^{*}$  & effective shear modulus                   & 5.7143e5 & \unit{\pascal} \\
+    $\beta$  & damping factor, Eq.~\eqref{eq:beta}       & 2.8000e-1 & -- \\
+    $S_{t}/S_{n}$ & stiffness ratio                      & 8.5714e-1 & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Boundary conditions}
+\label{sec:walls}
+
+\subsection{Fixed walls}
+
+The container is the rectangle $[0,B]\times[0,L]$ with rigid, fixed, frictional
+walls at $x=0$, $x=B$ and $y=0$.  A wall is treated as a sphere of infinite
+radius and infinite mass, so that~\eqref{eq:effective} degenerates to
+\begin{equation}
+  R^{*} = \lim_{R_{j}\to\infty} \frac{R_{i}R_{j}}{R_{i}+R_{j}} = R_{i},
+  \qquad
+  m^{*} = \lim_{m_{j}\to\infty} \frac{m_{i}m_{j}}{m_{i}+m_{j}} = m_{i}.
+  \label{eq:wall-effective}
+\end{equation}
+Because the wall neither translates nor spins, the relative surface velocity
+\eqref{eq:vrel} loses the $j$ terms,
+\begin{equation}
+  \mathbf{v}_{iw} = \mathbf{v}_{i} - R_{i}\omega_{i}\,\mathbf{t} .
+  \label{eq:vrel-wall}
+\end{equation}
+Apart from these substitutions the constitutive law of
+Section~\ref{sec:contact-summary} is applied unchanged, including the tangential
+history: walls are frictional and can therefore support shear, which is what
+produces the Janssen-like arching observed in tall containers.  The overlaps and
+outward normals are collected in Table~\ref{tab:boundaries}.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Boundary geometry.  $\mathbf{n}$ points from the boundary towards the
+  particle centre.}
+  \label{tab:boundaries}
+  \begin{tabular}{llll}
+    \toprule
+    Boundary & Location & Normal $\mathbf{n}$ & Overlap $\delta_{n}$ \\
+    \midrule
+    Left wall   & $x=0$    & $(+1,0)$ & $R_{i}-x_{i}$ \\
+    Right wall  & $x=B$    & $(-1,0)$ & $x_{i}+R_{i}-B$ \\
+    Bottom wall & $y=0$    & $(0,+1)$ & $R_{i}-y_{i}$ \\
+    Platen      & $y=y_{p}$& $(0,-1)$ & $y_{i}+R_{i}-y_{p}$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The top of the domain, $y=L$, is \emph{open}: nothing prevents a particle from
+leaving the box upwards during a violent collision.  In practice the deposition
+procedure of Section~\ref{sec:deposition} keeps velocities small enough for this
+never to occur.
+
+\subsection{Loading platen}
+\label{sec:platen}
+
+The platen is a rigid horizontal plate of width $B$ and mass $m_{p}$ whose
+underside is at $y=y_{p}$.  It has a single degree of freedom, the vertical
+translation, and is described by the state $(y_{p},v_{p})$.  Unlike the fixed
+walls it moves, so its velocity enters the relative surface velocity of every
+particle it touches,
+\begin{equation}
+  \mathbf{v}_{ip} = \bigl(\mathbf{v}_{i}-v_{p}\mathbf{e}_{y}\bigr)
+                    - R_{i}\omega_{i}\,\mathbf{t},
+  \qquad
+  \mathbf{n} = (0,-1),\quad \mathbf{t} = (1,0).
+  \label{eq:vrel-platen}
+\end{equation}
+Its effective radius and mass are still those of~\eqref{eq:wall-effective}: the
+platen is rigid and its finite mass appears only in its own equation of motion,
+not in the contact damping.
+
+Let $\mathcal{P}$ be the set of particles touching the platen.  By Newton's
+third law the vertical contact reaction on the platen is
+\begin{equation}
+  F_{p} = -\sum_{i\in\mathcal{P}} \mathbf{F}_{ip}\cdot\mathbf{e}_{y}
+        \;\ge\; 0 ,
+  \label{eq:platen-reaction}
+\end{equation}
+and the equation of motion of the platen reads
+\begin{equation}
+  \boxed{\;
+  m_{p}\,\dot v_{p} = F_{p} - F(t) - m_{p} g_{p},
+  \qquad
+  \dot y_{p} = v_{p} \;}
+  \label{eq:platen-eom}
+\end{equation}
+where $F(t)>0$ is the externally prescribed load pushing the platen \emph{down}
+and $g_{p}$ is an optional self-weight (set to zero by default, so that the
+platen mass acts purely as an inertial regulariser).  Equation
+\eqref{eq:platen-eom} makes the loading a \emph{force-controlled} boundary
+condition: the platen finds its own displacement as the packing resists.  In
+equilibrium $F_{p}=F(t)$, and the platen mass controls only how quickly that
+balance is reached; a heavier platen filters the high-frequency contact noise at
+the price of a slower approach to equilibrium.
+
+The recorded platen displacement, positive downwards, is measured from the
+position $y_{p}^{0}$ at which the platen was first placed on the bed,
+\begin{equation}
+  u_{p}(t) = y_{p}^{0} - y_{p}(t).
+  \label{eq:platen-disp}
+\end{equation}
+
+\subsection{Prescribed load history}
+
+The applied load is any user-supplied function $F(t)$.  The default is a linear
+ramp followed by a hold,
+\begin{equation}
+  F(t) =
+  \begin{cases}
+    0, & t\le 0,\\[2pt]
+    F_{\max}\,\dfrac{t}{t_{r}}, & 0<t<t_{r},\\[6pt]
+    F_{\max}, & t\ge t_{r},
+  \end{cases}
+  \label{eq:ramp}
+\end{equation}
+with an option to release the load ($F=0$ for $t\ge t_{r}$) instead of holding
+it, which allows unloading branches to be simulated.  The load clock $t$
+in~\eqref{eq:ramp} is reset when the platen is engaged, so it measures time
+since the beginning of the compression stage and not since the beginning of the
+simulation.  The ramp duration $t_{r}$ must be long compared with the
+characteristic contact time~\eqref{eq:tc}, otherwise the response is dynamic
+rather than quasi-static.
+
+\section{Energy balance}
+\label{sec:energy}
+
+Although the code does not monitor it, the energy budget is a useful check.  The
+stored energy of a contact is obtained by integrating the elastic parts of
+\eqref{eq:hertz} and~\eqref{eq:Ft-trial},
+\begin{equation}
+  U_{n} = \int_{0}^{\delta_{n}} k_{n}s^{3/2}\,\mathrm{d}s
+        = \frac{2}{5}k_{n}\delta_{n}^{5/2},
+  \qquad
+  U_{t} = \tfrac{1}{2}S_{t}\lVert\boldsymbol{\xi}\rVert^{2},
+  \label{eq:strain-energy}
+\end{equation}
+so the total mechanical energy of the system is
+\begin{equation}
+  E =
+  \underbrace{\sum_{i}\Bigl(\tfrac{1}{2}m_{i}\lVert\mathbf{v}_{i}\rVert^{2}
+                          + \tfrac{1}{2}I_{i}\omega_{i}^{2}\Bigr)
+              + \tfrac{1}{2}m_{p}v_{p}^{2}}_{\text{kinetic}}
+  + \underbrace{\sum_{i} m_{i}g\,y_{i}}_{\text{potential}}
+  + \underbrace{\sum_{\text{contacts}} \bigl(U_{n}+U_{t}\bigr)}_{\text{stored}} .
+  \label{eq:energy}
+\end{equation}
+Energy leaves the system through the two dashpots and through frictional
+sliding,
+\begin{equation}
+  \mathcal{D}
+  = \sum_{\text{contacts}}
+    \Bigl(
+      c_{n}v_{n}^{2}
+      + c_{t}\lVert\mathbf{v}_{t}\rVert^{2}
+      + \lVert\mathbf{F}_{t}\rVert\,
+        \lVert\mathbf{v}_{t}^{\text{slip}}\rVert
+    \Bigr) \;\ge\; 0 ,
+  \label{eq:dissipation}
+\end{equation}
+and enters through the work of the applied load, $\dot W = F(t)\,v_{p}^{\downarrow}$.
+The monotone dissipation~\eqref{eq:dissipation} is what allows the deposition
+stage to converge to a static packing.
+
+\section{Characteristic scales}
+\label{sec:scales}
+
+Three scales control the behaviour of the model and are used repeatedly in
+Chapters~\ref{cha:numerical} and~\ref{cha:examples}.
+
+\paragraph{Static overlap under a given load.}  Inverting~\eqref{eq:hertz},
+\begin{equation}
+  \delta_{n}
+  = \left(\frac{3F_{n}}{4E^{*}\sqrt{R^{*}}}\right)^{2/3} .
+  \label{eq:delta-static}
+\end{equation}
+The ratio $\delta_{n}/R$ is the key fidelity indicator of a soft-sphere
+simulation and should remain of the order of one per cent.
+
+\paragraph{Binary collision duration.}  For a Hertzian impact at relative
+approach velocity $v_{0}$ the contact lasts~\cite{johnson1985}
+\begin{equation}
+  t_{c} \simeq 2.87
+  \left(\frac{m^{*2}}{R^{*}\,{E^{*}}^{2}\,v_{0}}\right)^{1/5} .
+  \label{eq:tc}
+\end{equation}
+The time step must resolve $t_{c}$ with several tens of increments; this is the
+physical origin of the stability restriction discussed in
+Section~\ref{sec:timestep}.
+
+\paragraph{Free-fall and elastic wave scales.}  The time for a grain to fall its
+own diameter, $\sqrt{4R/g}$, characterises the deposition stage, whereas the
+shear-wave travel time across the smallest grain, $R_{\min}\sqrt{\rho/G}$,
+characterises the stiffest response the mesh-free discretisation must follow.
+The ratio of the two is the reason why DEM simulations of deposition are
+expensive: the physics is slow, the stability limit is fast.

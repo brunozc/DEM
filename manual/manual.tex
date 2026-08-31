@@ -1,0 +1,109 @@
+\documentclass[11pt, a4paper, oneside]{scrreprt}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+
+\usepackage{setspace}
+\onehalfspacing
+
+\usepackage[dvipsnames]{xcolor}
+\definecolor{accent}{HTML}{004F9F}
+
+\addtokomafont{chapter}{\color{accent}}
+\addtokomafont{section}{\color{accent}}
+\addtokomafont{subsection}{\color{accent}}
+
+
+\usepackage{graphicx}
+\usepackage{amsmath,amsfonts,amssymb}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\sisetup{detect-all}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{enumitem}
+\usepackage{xstring}
+\usepackage{catchfile}
+
+% -------------------------------------------------------
+%  hyperref customization
+% -------------------------------------------------------
+\usepackage[
+  pdfauthor={Bruno},
+  pdftitle={DEM cookies manual},
+  colorlinks=true,
+  linkcolor=accent,
+  urlcolor=accent,
+  citecolor=accent
+]{hyperref}
+
+% -------------------------------------------------------
+%  header and footer
+% -------------------------------------------------------
+\usepackage{fancyhdr}
+\renewcommand{\chaptermark}[1]{\markboth{\thechapter}{}}
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small{DEM cookies manual}}
+\rhead{\small{Chapter~\thechapter}}
+\cfoot{\small{\thepage}}
+
+% -------------------------------------------------------
+%  paragraph style
+% -------------------------------------------------------
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.8em}
+
+% -------------------------------------------------------
+%  title page
+% -------------------------------------------------------
+\newcommand{\reporttitle}{
+    \begin{titlepage}
+    \centering
+    \vspace*{2cm}
+    {\Huge\bfseries DEM cookies manual \\[1.5em]}
+    \rule{\textwidth}{0.5pt} \\[1.5em]
+    {\Large Numerical Accuracy and Validation Results}\\[4em]
+    {\Large \textbf{Bruno}}\\[1em]
+    \today
+    \vfill
+    \end{titlepage}
+}
+
+% % -------------------------------------------------------
+% %  draft watermark
+% % -------------------------------------------------------
+% \usepackage{draftwatermark}
+% \SetWatermarkText{DRAFT}
+% \SetWatermarkScale{1}
+% \SetWatermarkColor[HTML]{B0B0B0}
+
+
+% -------------------------------------------------------
+%  document
+% -------------------------------------------------------
+\begin{document}
+
+\reporttitle
+\tableofcontents
+\clearpage
+
+\chapter*{Summary}
+\addcontentsline{toc}{chapter}{Summary} % include in ToC
+\input{summary.tex}
+\clearpage
+
+\input{introduction.tex}
+\input{formulation.tex}
+\input{numerical_solution.tex}
+\input{examples.tex}
+
+\clearpage
+\bibliographystyle{unsrt}
+\bibliography{references}
+
+\end{document}

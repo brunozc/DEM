@@ -1,0 +1,598 @@
+\chapter{Numerical solution}
+\label{cha:numerical}
+
+This chapter describes how the continuous model of Chapter~\ref{cha:formulation}
+is turned into an algorithm: the data structures, the explicit time integrator
+and its stability limit, the contact-detection strategy, the bookkeeping of the
+tangential history, the deposition procedure that builds the initial packing,
+and the resulting computational cost.
+
+\section{Overview of the algorithm}
+\label{sec:overview}
+
+The simulation is advanced by a fixed-step explicit scheme.  One time step
+consists of the operations listed below; the numbering is used as a reference in
+the remainder of the chapter.
+
+\begin{center}
+\fbox{\parbox{0.93\textwidth}{\small
+\textbf{Algorithm 1 -- one time step} (\texttt{DEMSimulation.step})
+\begin{enumerate}[leftmargin=2.2em,nosep]
+  \item \emph{First half kick} (uses the forces stored from the previous
+        evaluation)\\
+        $\mathbf{v}_{i}\!\leftarrow\!\mathbf{v}_{i}
+          +\tfrac{\Delta t}{2}\mathbf{F}_{i}/m_{i}$,\quad
+        $\omega_{i}\!\leftarrow\!\omega_{i}+\tfrac{\Delta t}{2}T_{i}/I_{i}$,\quad
+        $v_{p}\!\leftarrow\!v_{p}+\tfrac{\Delta t}{2}a_{p}\bigl(t^{n}\bigr)$
+  \item \emph{Drift}\\
+        $\mathbf{x}_{i}\!\leftarrow\!\mathbf{x}_{i}+\Delta t\,\mathbf{v}_{i}$,\quad
+        $y_{p}\!\leftarrow\!y_{p}+\Delta t\,v_{p}$,\quad
+        $t\!\leftarrow\!t+\Delta t$
+  \item \emph{Force evaluation} (\texttt{compute\_forces})
+    \begin{enumerate}[leftmargin=1.6em,nosep,label=(\alph*)]
+      \item reset $\mathbf{F}_{i}$, $T_{i}$; add gravity $-m_{i}g\,\mathbf{e}_{y}$;
+      \item rebuild the cell list and generate candidate pairs
+            (Section~\ref{sec:broadphase});
+      \item for each candidate pair: exact overlap test~\eqref{eq:overlap},
+            contact law of Section~\ref{sec:contact-summary}, assembly of
+            $\pm\mathbf{F}_{ij}$ and $T_{ij},T_{ji}$;
+      \item for each particle: three wall contacts and, if active, the platen
+            contact; accumulate the platen reaction~\eqref{eq:platen-reaction};
+      \item replace the tangential-history table by the one just built
+            (Section~\ref{sec:history}).
+    \end{enumerate}
+  \item \emph{Second half kick} (uses the new forces and $F(t^{n+1})$)\\
+        $\mathbf{v}_{i}\!\leftarrow\!\mathbf{v}_{i}
+          +\tfrac{\Delta t}{2}\mathbf{F}_{i}/m_{i}$,\quad
+        $\omega_{i}\!\leftarrow\!\omega_{i}+\tfrac{\Delta t}{2}T_{i}/I_{i}$,\quad
+        $v_{p}\!\leftarrow\!v_{p}+\tfrac{\Delta t}{2}a_{p}\bigl(t^{n+1}\bigr)$
+\end{enumerate}
+}}
+\end{center}
+
+Three drivers chain these steps into the physical stages of the experiment:
+\texttt{rain\_until\_full} (deposition, Section~\ref{sec:deposition}),
+\texttt{rest} (relaxation) and \texttt{compress} (loading).
+
+\section{State representation}
+\label{sec:state}
+
+All particle data are held in contiguous \texttt{NumPy} arrays that grow as
+particles are inserted:
+
+\begin{center}
+\begin{tabular}{lll}
+  \toprule
+  Array & Shape & Content \\
+  \midrule
+  \texttt{pos}, \texttt{vel}, \texttt{force} & $(N,2)$ & $\mathbf{x}_{i}$, $\mathbf{v}_{i}$, $\mathbf{F}_{i}$ \\
+  \texttt{omega}, \texttt{torque}            & $(N,)$  & $\omega_{i}$, $T_{i}$ \\
+  \texttt{radius}, \texttt{mass}, \texttt{inertia} & $(N,)$ & $R_{i}$, $m_{i}$, $I_{i}$ \\
+  \texttt{inv\_mass}, \texttt{inv\_inertia}  & $(N,)$  & $1/m_{i}$, $1/I_{i}$ \\
+  \texttt{tangential}                        & dict    & $\boldsymbol{\xi}$ per contact \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+Two implementation details matter.  First, the reciprocals $1/m_{i}$ and
+$1/I_{i}$ are cached because they are used twice per step, in the two half
+kicks.  Second, new particles are always \emph{appended} at the end of the
+arrays, never inserted; existing indices are therefore stable, which is what
+makes the index-keyed history table of Section~\ref{sec:history} valid across
+insertions.  Whenever the radius array changes, $m_{i}$, $I_{i}$ and their
+reciprocals are recomputed from~\eqref{eq:massprops}.
+
+\section{Time integration}
+\label{sec:integration}
+
+\subsection{Velocity-Verlet scheme}
+
+The equations of motion~\eqref{eq:newton}--\eqref{eq:euler} are integrated with
+the velocity-Verlet algorithm~\cite{swope1982,allen2017} in its kick--drift--kick
+form:
+\begin{align}
+  \mathbf{v}^{\,n+1/2} &= \mathbf{v}^{\,n}
+    + \frac{\Delta t}{2}\,\frac{\mathbf{F}^{\,n}}{m},
+    \label{eq:vv1}\\
+  \mathbf{x}^{\,n+1} &= \mathbf{x}^{\,n} + \Delta t\,\mathbf{v}^{\,n+1/2},
+    \label{eq:vv2}\\
+  \mathbf{F}^{\,n+1} &= \mathbf{F}\bigl(\mathbf{x}^{\,n+1},
+                        \mathbf{v}^{\,n+1/2},
+                        \boldsymbol{\xi}^{\,n+1}\bigr),
+    \label{eq:vv3}\\
+  \mathbf{v}^{\,n+1} &= \mathbf{v}^{\,n+1/2}
+    + \frac{\Delta t}{2}\,\frac{\mathbf{F}^{\,n+1}}{m}.
+    \label{eq:vv4}
+\end{align}
+The rotational degrees of freedom and the platen degree of freedom are advanced
+by the same three-stage pattern, with $T_{i}/I_{i}$ and
+$a_{p}=\bigl(F_{p}-F(t)-m_{p}g_{p}\bigr)/m_{p}$ in place of $\mathbf{F}/m$.
+
+The scheme is explicit, requires a single force evaluation per step, stores no
+history beyond the current state, is time reversible, and is second-order
+accurate: the local truncation error is $O(\Delta t^{3})$ in position and the
+global error is $O(\Delta t^{2})$.  For conservative forces it is symplectic,
+so the energy error remains bounded rather than drifting -- an essential
+property for the long deposition runs.
+
+\subsection{Velocity-dependent forces}
+
+The contact force is not conservative: it depends on $\mathbf{v}$ through the
+dashpots~\eqref{eq:cn} and~\eqref{eq:Ft-trial}.  In~\eqref{eq:vv3} it is
+evaluated at the half-step velocity $\mathbf{v}^{\,n+1/2}$, which is the only
+velocity available at that point without an implicit solve or an extra
+iteration.  Since
+$\mathbf{v}^{\,n+1/2}=\mathbf{v}^{\,n+1}-\tfrac{\Delta t}{2}\mathbf{a}^{\,n+1}
+ +O(\Delta t^{2})$, the dissipative part of the force carries an $O(\Delta t)$
+error, so the scheme is formally first order in the damping contribution and
+strictly symplectic only in the limit $\beta\to0$.  The resulting bias is
+proportional to $\beta$ and to $\Delta t/t_{c}$; with the values used here
+($\beta=0.28$, $\Delta t/t_{c}\approx0.03$) it is well below the other
+modelling errors.  The same approximation is made by most production DEM
+codes~\cite{silbert2001,kloss2012}.
+
+\subsection{Reference integrator for verification}
+
+The class \texttt{VelocityVerlet} implements~\eqref{eq:vv1}--\eqref{eq:vv4} for
+a generic acceleration callback $\mathbf{a}(\mathbf{x},\mathbf{v})$.  It is not
+used by the production loop -- which fuses the kicks with the force evaluation
+to avoid recomputing $\mathbf{F}^{\,n}$ -- but it exposes the integrator to unit
+testing against analytical solutions (Section~\ref{sec:unit-tests}).
+
+\section{Stable time step}
+\label{sec:timestep}
+
+Being explicit, the integrator is only conditionally stable.  The binding
+restriction is the fastest elastic response of the assembly, which is the
+propagation of a surface (Rayleigh) wave across the \emph{smallest} particle.
+The Rayleigh critical time step is
+\begin{equation}
+  \boxed{\;
+  T_{R} = \frac{\pi R_{\min}}{0.1631\,\nu + 0.8766}
+          \sqrt{\frac{\rho}{G}} \;}
+  \label{eq:rayleigh}
+\end{equation}
+where the denominator is the standard rational approximation of the ratio
+between the Rayleigh and the shear wave speeds~\cite{osullivan2004}.  The code
+uses a safety fraction
+\begin{equation}
+  \Delta t = \alpha\,T_{R},
+  \qquad \alpha = 0.2 ,
+  \label{eq:dt}
+\end{equation}
+which lies in the middle of the range $0.1$--$0.3$ recommended in the
+literature for dense assemblies with coordination numbers of four to six.  A
+user-supplied $\Delta t$ overrides~\eqref{eq:dt}.
+
+Three remarks on~\eqref{eq:rayleigh}:
+\begin{itemize}[leftmargin=1.6em]
+  \item It scales with $R_{\min}$, not with the mean radius.  A single very
+        small grain therefore penalises the whole simulation, which is why the
+        size ratio $R_{\max}/R_{\min}$ should be kept moderate.
+  \item It scales with $\sqrt{\rho/G}$, i.e.\ with the inverse shear-wave
+        speed.  Reducing $E$ (and hence $G$) by a factor of $100$ increases the
+        admissible time step by a factor of $10$; this "artificial softening" is
+        the standard device that makes DEM of stiff materials affordable, at
+        the cost of larger overlaps (Section~\ref{sec:limitations}).
+  \item It is independent of the load.  A complementary check is that
+        $\Delta t$ must resolve the collision time~\eqref{eq:tc}; both criteria
+        are evaluated in Table~\ref{tab:dt} and the Rayleigh one is the more
+        restrictive.
+\end{itemize}
+
+\begin{table}[htbp]
+  \centering
+  \caption{Time-step data for the reference simulation
+  ($R_{\min}=\qty{4}{\milli\metre}$, $R_{\max}=\qty{20}{\milli\metre}$).}
+  \label{tab:dt}
+  \begin{tabular}{llS[table-format=1.3e2]l}
+    \toprule
+    Symbol & Quantity & {Value} & Unit \\
+    \midrule
+    $T_{R}$    & Rayleigh critical step, Eq.~\eqref{eq:rayleigh} & 4.843e-4 & \unit{\second} \\
+    $\alpha$   & safety fraction                                 & 2.000e-1 & -- \\
+    $\Delta t$ & time step used                                  & 9.686e-5 & \unit{\second} \\
+    $t_{c}$    & collision time at $v_{0}=\qty{1}{\metre\per\second}$,
+                 Eq.~\eqref{eq:tc}                               & 3.269e-3 & \unit{\second} \\
+    $t_{c}/\Delta t$ & steps resolving one collision             & 3.380e1  & -- \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{Contact detection}
+\label{sec:broadphase}
+
+\subsection{Uniform grid (cell list)}
+
+A naive search over all $\tfrac{1}{2}N(N-1)$ pairs costs $O(N^{2})$ per step and
+is unaffordable.  Instead the domain is covered by a uniform grid of square
+cells of side
+\begin{equation}
+  h = 2R_{\max},
+  \label{eq:cellsize}
+\end{equation}
+and every particle is binned into the cell
+\begin{equation}
+  c(\mathbf{x}_{i}) = \bigl(\lfloor x_{i}/h\rfloor,\;
+                            \lfloor y_{i}/h\rfloor\bigr) \in \mathbb{Z}^{2}.
+  \label{eq:cellindex}
+\end{equation}
+Only occupied cells are stored, in a hash map from the index pair to the list of
+particles it contains, so the memory cost is $O(N)$ regardless of how empty the
+box is -- an important property during deposition, when the bed occupies a small
+and growing fraction of the domain.
+
+\paragraph{Correctness.}  The choice~\eqref{eq:cellsize} guarantees that no
+contact is missed.  If $i$ and $j$ touch then
+$d_{ij}<R_{i}+R_{j}\le 2R_{\max}=h$, hence
+$\lvert x_{i}-x_{j}\rvert<h$ and $\lvert y_{i}-y_{j}\rvert<h$, so their cell
+indices differ by at most one in each direction.  Searching a particle's own
+cell and its eight neighbours is therefore exhaustive.
+
+\paragraph{Half stencil.}  To visit every unordered pair exactly once, the
+search combines the pairs inside each cell with the pairs between the cell and
+only \emph{half} of its neighbours,
+\begin{equation}
+  \mathcal{O} = \bigl\{(1,0),\ (0,1),\ (1,1),\ (-1,1)\bigr\},
+  \label{eq:stencil}
+\end{equation}
+the remaining four offsets being the negatives of these and therefore already
+covered when the neighbouring cell is processed.  This halves the number of
+candidate pairs and, more importantly, removes the risk of applying a contact
+force twice.
+
+\paragraph{Narrow phase.}  Each candidate pair is then subjected to the exact
+test~\eqref{eq:overlap}; non-overlapping candidates are discarded before any
+constitutive evaluation.  The pair is canonically ordered as $(i,j)$ with $i<j$
+so that the history key of Section~\ref{sec:history} is unique.
+
+\subsection{Cost and the effect of polydispersity}
+
+With a cell size fixed by the largest particle, the expected number of particles
+per cell is
+\begin{equation}
+  n_{\text{cell}} \sim \phi \left(\frac{h}{2\bar{R}}\right)^{2}
+  \quad\text{and, in the worst case,}\quad
+  n_{\text{cell}}^{\max} \sim
+  \left(\frac{R_{\max}}{R_{\min}}\right)^{2},
+\end{equation}
+so the number of candidate pairs per particle grows quadratically with the size
+ratio.  For the reference case $R_{\max}/R_{\min}=5$, which is already a
+noticeable penalty: a hierarchical grid or per-size-class cell lists would be
+the natural remedy for broader distributions.  The overall cost of one step is
+nevertheless
+\begin{equation}
+  \mathcal{O}\bigl(N\bigr)\ \text{(binning)}
+  + \mathcal{O}\bigl(N\,\bar{n}_{\text{pairs}}\bigr)\ \text{(narrow phase)},
+\end{equation}
+i.e.\ linear in $N$ with a size-ratio-dependent constant.  The grid is rebuilt
+from scratch at every step; no Verlet neighbour list with a skin distance is
+used, which keeps the implementation simple and free of the "lost contact"
+errors that an out-of-date neighbour list can produce.
+
+\section{Tangential-history bookkeeping}
+\label{sec:history}
+
+The tangential spring $\boldsymbol{\xi}$ must persist as long as the contact
+exists and must disappear with it.  This is achieved with a dictionary keyed by
+a contact identifier:
+\begin{center}
+\begin{tabular}{ll}
+  \toprule
+  Key & Contact \\
+  \midrule
+  \texttt{("pp", i, j)} & particle $i$ -- particle $j$, with $i<j$ \\
+  \texttt{("wL", i)}, \texttt{("wR", i)}, \texttt{("wB", i)} & particle $i$ -- left / right / bottom wall \\
+  \texttt{("pl", i)} & particle $i$ -- platen \\
+  \bottomrule
+\end{tabular}
+\end{center}
+
+At every force evaluation a \emph{fresh} table is built and the old one is
+consulted through
+$\boldsymbol{\xi}_{\text{old}}=\texttt{old.get(key},\ \mathbf{0})$.  This single
+design decision provides three behaviours for free:
+
+\begin{enumerate}[leftmargin=2.2em]
+  \item \textbf{Creation.}  A contact that closes for the first time finds no
+        entry and starts from $\boldsymbol{\xi}=\mathbf{0}$, as required.
+  \item \textbf{Persistence.}  A contact that survives copies its spring
+        forward, which is projected and incremented
+        by~\eqref{eq:xi-project}--\eqref{eq:xi-accumulate}.
+  \item \textbf{Deletion.}  A contact that opens is simply not re-inserted into
+        the new table; its history is garbage collected, and a later re-closure
+        starts afresh.  No explicit pruning pass is needed, and the memory
+        occupied by the table is always proportional to the number of
+        \emph{active} contacts.
+\end{enumerate}
+
+The keys are index based, which is safe only because indices are never
+permuted (Section~\ref{sec:state}).  The price of the approach is one dictionary
+allocation per step and the cost of hashing every active contact, which is
+significant in Python but not in the overall $O(N)$ picture.
+
+Two consistency requirements follow from~\eqref{eq:xi-accumulate}:
+\texttt{compute\_forces} must be called exactly once per time step, and the
+$\Delta t$ passed to the contact law must be the integration step.  The drivers
+call \texttt{compute\_forces} once before entering their loop to prime
+$\mathbf{F}^{\,0}$ for the first half kick; this initial evaluation contributes
+one extra increment to the springs of the contacts that are already closed, an
+$O(\Delta t)$ perturbation of a quiescent state that is immediately relaxed.
+
+\section{Boundary and platen coupling}
+\label{sec:coupling}
+
+Wall contacts are evaluated in a single pass over the particles, using the
+overlaps of Table~\ref{tab:boundaries} and the degenerate effective quantities
+\eqref{eq:wall-effective}.  Because the three fixed walls are tested for every
+particle irrespective of its position, the cost is $O(N)$ with a very small
+constant; the overlap test rejects the interior particles immediately.
+
+The platen is integrated with the same velocity-Verlet pattern as the particles,
+in a \emph{staggered} (explicit, one-way at each half step) fashion:
+\begin{itemize}[leftmargin=1.6em]
+  \item the first half kick uses the reaction $F_{p}$ computed at the end of the
+        previous step and the load $F(t^{n})$;
+  \item the drift moves the platen with $v_{p}^{\,n+1/2}$, so the particles see
+        the new platen position and the half-step platen velocity
+        in~\eqref{eq:vrel-platen};
+  \item the force evaluation accumulates the new reaction
+        $F_{p}^{\,n+1}=-\sum_{i}\mathbf{F}_{ip}\cdot\mathbf{e}_{y}$;
+  \item the second half kick uses $F_{p}^{\,n+1}$ and $F(t^{n+1})$.
+\end{itemize}
+The coupling is therefore fully explicit and adds no stability restriction of
+its own provided that the platen is not much lighter than the grains it
+touches; a very light platen would behave like an extra particle with a very
+small mass and would require a smaller $\Delta t$ through the $m^{*}$
+in~\eqref{eq:cn}.  A practical rule is $m_{p}\gtrsim 10\,m_{\max}$; the
+reference case uses $m_{p}=\qty{0.5}{\kilogram}$ against
+$m_{\max}=\qty{0.084}{\kilogram}$.
+
+The load clock \texttt{time\_load} is advanced only while the platen is active,
+so $F(t)$ in~\eqref{eq:ramp} always starts from zero when compression begins,
+independently of how long the deposition took.
+
+\section{Initial configuration and deposition}
+\label{sec:deposition}
+
+A DEM result is only as good as its initial packing.  Two generators are
+provided.
+
+\subsection{Loose lattice generator}
+
+\texttt{generate\_rain\_particles} places $N$ particles on a jittered
+rectangular lattice above the bed.  With a lattice pitch
+\begin{equation}
+  s = 2 R_{\max}\,\sigma, \qquad \sigma > 1
+  \quad(\text{default } \sigma = 1.15),
+\end{equation}
+the number of columns that fit between the side walls is
+$n_{\text{col}}=\lfloor (B-2R_{\max})/s \rfloor + 1$, and particle $k$ is
+assigned to column $k \bmod n_{\text{col}}$ and row $\lfloor k/n_{\text{col}}
+\rfloor$.  A uniform random offset of amplitude
+\begin{equation}
+  \Delta_{\text{jitter}} = \tfrac{1}{2}\,j\,\bigl(s - 2R_{\max}\bigr),
+  \qquad 0 \le j \le 1 \quad (\text{default } j = 0.25),
+\end{equation}
+is added to both coordinates.  The bound on the amplitude is chosen so that
+\emph{no} initial overlap can be created, whatever the random draw: the residual
+clearance $s-2R_{\max}$ is never fully consumed.  Breaking the lattice symmetry
+matters, because a perfect lattice collapses into a crystalline packing with
+spurious anisotropy.  Radii are drawn from~\eqref{eq:radii} with an explicit
+seed, so packings are reproducible.
+
+\subsection{Wave-by-wave raining}
+
+The driver actually used for the reference simulation,
+\texttt{rain\_until\_full}, starts from an \emph{empty} box and fills it
+adaptively.
+
+\begin{center}
+\fbox{\parbox{0.93\textwidth}{\small
+\textbf{Algorithm 2 -- raining until full} (\texttt{rain\_until\_full})
+\begin{enumerate}[leftmargin=2.2em,nosep]
+  \item $w \leftarrow 0$ (counter of consecutive empty waves)
+  \item \textbf{while} $w < w_{\max}$ \textbf{and} $N < N_{\max}$
+        \textbf{and} steps $<$ cap:
+    \begin{enumerate}[leftmargin=1.6em,nosep,label=(\alph*)]
+      \item attempt to insert $n_{b}$ particles in the band
+            $y\in[L-2R_{\max},\,L-R_{\max}]$, $x\in[R,\,B-R]$, by rejection
+            sampling: a candidate is accepted only if it overlaps neither an
+            existing particle near the top nor a particle already accepted in
+            this wave; up to $n_{a}$ attempts per particle;
+      \item append the accepted particles with velocity
+            $(0,-v_{\text{rain}})$;
+      \item $w \leftarrow 0$ if at least one particle was inserted, else
+            $w \leftarrow w+1$;
+      \item advance $n_{s}$ time steps (Algorithm 1).
+    \end{enumerate}
+  \item \textbf{final settling}: advance up to $n_{\text{settle}}$ steps,
+        stopping as soon as the quiescence criterion~\eqref{eq:quiet} is met.
+\end{enumerate}
+}}
+\end{center}
+
+The rejection test is restricted to the particles whose centres lie above
+$L-4R_{\max}$, which keeps the insertion cost proportional to the number of
+grains near the surface rather than to $N$.  The small downward seed velocity
+$v_{\text{rain}}$ removes the initial free-fall transient and makes the arrival
+of successive waves more regular.  The termination logic is purely geometric:
+when the growing bed reaches the insertion band, rejection sampling can no
+longer place anything, $w$ reaches $w_{\max}$ and the loop exits.  The number of
+particles is therefore an \emph{output} of the procedure, determined by the box
+geometry and the size distribution, not an input.  Default values are collected
+in Table~\ref{tab:deposition}.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Deposition parameters (values used in the reference simulation).}
+  \label{tab:deposition}
+  \begin{tabular}{llll}
+    \toprule
+    Symbol & Meaning & Code name & Value \\
+    \midrule
+    $n_{b}$            & particles per wave                & \texttt{batch\_size}     & 15 \\
+    $n_{s}$            & steps between waves               & \texttt{steps\_between}  & 450 \\
+    $n_{a}$            & placement attempts per particle   & \texttt{attempts}        & 30 \\
+    $w_{\max}$         & empty waves before stopping       & \texttt{patience}        & 4 \\
+    $v_{\text{rain}}$  & seed velocity                     & \texttt{\_rain\_speed}   & \qty{0.3}{\metre\per\second} \\
+    $n_{\text{settle}}$& maximum settling steps            & \texttt{settle\_steps}   & 4000 \\
+    $N_{\max}$         & hard cap on particle number       & \texttt{max\_particles}  & 2000 \\
+    $\epsilon$         & quiescence tolerance              & \texttt{quiet\_tol}      & \qty{1e-6}{\joule} \\
+    -- & random seed & \texttt{seed} & 7 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Quiescence criterion}
+
+Deposition and settling terminate on the mean translational kinetic energy per
+particle,
+\begin{equation}
+  \boxed{\;
+  \bar{E}_{k}
+  = \frac{1}{N}\sum_{i=1}^{N}\tfrac{1}{2}m_{i}\lVert\mathbf{v}_{i}\rVert^{2}
+  \;<\; \epsilon \;}
+  \label{eq:quiet}
+\end{equation}
+combined with a minimum number of steps, so that the criterion cannot be
+satisfied trivially at $t=0$ when every particle is still at rest.  The
+normalisation by $N$ makes the threshold independent of how many particles have
+been deposited, which is essential here because $N$ grows during the run.  A
+useful way to choose $\epsilon$ is to compare it with the potential energy of a
+grain displaced by a small fraction of its own radius: with
+$\epsilon=\qty{1e-6}{\joule}$ and a mean grain mass of about
+\qty{2e-2}{\kilogram}, the corresponding root-mean-square velocity is
+$\sqrt{2\epsilon/\bar{m}}\approx\qty{1e-2}{\metre\per\second}$, i.e.\ two orders
+of magnitude below the raining velocity.
+
+\section{Recording and post-processing}
+\label{sec:recording}
+
+Two output streams are collected at user-defined intervals.
+
+\begin{description}[leftmargin=1.6em,style=nextline]
+  \item[Frames] $\bigl(t,\ \mathbf{x}_{i},\ R_{i},\
+        \lVert\mathbf{v}_{i}\rVert,\ y_{p},\ \text{phase}\bigr)$, recorded every
+        \texttt{record\_every} steps.  Positions and radii are \emph{copied},
+        not referenced, because the underlying arrays are overwritten in place
+        and reallocated when particles are appended.  The phase label
+        (\texttt{deposition}, \texttt{settling}, \texttt{loading}) is carried
+        along so that the animation can be annotated.
+  \item[Load curve] $\bigl(t,\ F(t),\ u_{p},\ F_{p}\bigr)$, recorded only during
+        the compression stage.  Comparing $F(t)$ with $F_{p}$ is the simplest
+        available check of quasi-staticity: the two curves coincide when the
+        platen inertia is negligible, and separate when the loading is too fast.
+\end{description}
+
+The number of stored frames, not the number of time steps, dominates the memory
+footprint of a long run: each frame holds $O(N)$ floating-point numbers.
+
+\section{Verification strategy}
+\label{sec:verification}
+
+The implementation is verified at three levels, in increasing order of
+integration:
+\begin{enumerate}[leftmargin=2.2em]
+  \item \emph{Unit level}: each closed-form expression
+        (\eqref{eq:moduli}, \eqref{eq:hertz}, \eqref{eq:coulomb}) and the
+        integrator are compared with analytical results
+        (Section~\ref{sec:unit-tests});
+  \item \emph{Component level}: single-contact experiments -- a bouncing grain,
+        a sliding grain -- reproduce the prescribed restitution and friction
+        coefficients (Section~\ref{sec:component-tests});
+  \item \emph{System level}: the full deposition-and-compression experiment is
+        checked for global consistency, in particular the equilibrium condition
+        $F_{p}\to F(t)$ (Section~\ref{sec:reference-run}).
+\end{enumerate}
+
+\section{Validity, accuracy and practical guidance}
+\label{sec:limitations}
+
+\subsection{The overlap criterion}
+
+The Hertz--Mindlin law is a linear-elastic, half-space solution.  Its derivation
+assumes that the contact radius is small compared with the sphere radius,
+$a\ll R$, which through~\eqref{eq:contact-radius} is equivalent to
+\begin{equation}
+  \boxed{\;
+  \frac{\delta_{n}}{R} \ll 1,
+  \qquad\text{in practice}\qquad
+  \frac{\delta_{n}}{R}\lesssim 1\% \;}
+  \label{eq:overlap-criterion}
+\end{equation}
+Combining~\eqref{eq:delta-static} with the fact that a load $F$ applied to a
+platen of width $B$ is carried by roughly $n_{c}\approx B/(2\bar{R})$ contacts
+gives an \emph{a priori} estimate of the overlap in the top layer,
+\begin{equation}
+  \frac{\delta_{n}}{\bar{R}}
+  \approx \frac{1}{\bar{R}}
+  \left(\frac{3F}{4 n_{c} E^{*}\sqrt{\bar{R}/2}}\right)^{2/3}.
+  \label{eq:overlap-estimate}
+\end{equation}
+Table~\ref{tab:overlap} evaluates~\eqref{eq:overlap-estimate} for the reference
+material.  It shows that with $E=\qty{5}{\mega\pascal}$ the model is
+quantitatively trustworthy only up to a few tens of newtons; beyond that the
+grains interpenetrate visibly and the computed stiffness of the packing is no
+longer that of a Hertzian assembly.  This is a limitation of the chosen
+\emph{parameters}, not of the implementation, and it is quantified further in
+Section~\ref{sec:load-level}.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Estimated overlap in the layer directly under the platen, from
+  Eq.~\eqref{eq:overlap-estimate}, for $B=\qty{0.2}{\metre}$,
+  $\bar{R}=\qty{12}{\milli\metre}$, $n_{c}\approx8$, $E^{*}=\qty{2.67}{\mega\pascal}$.}
+  \label{tab:overlap}
+  \begin{tabular}{S[table-format=4.0]S[table-format=3.1]S[table-format=2.2]l}
+    \toprule
+    {$F$ [\unit{\newton}]} & {$F/n_{c}$ [\unit{\newton}]} &
+    {$\delta_{n}/\bar{R}$ [\%]} & Assessment \\
+    \midrule
+      1  &  0.1 &  0.42 & quantitatively valid \\
+     10  &  1.3 &  2.3  & acceptable \\
+    100  & 12.5 & 10.6  & qualitative only \\
+    1000 &  125 & 49.2  & outside the model's range \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Artificial softening}
+
+Real sand or glass has $E\sim\qty{50}{\giga\pascal}$; the reference material
+uses $\qty{5}{\mega\pascal}$, four orders of magnitude softer.  This is the usual
+compromise: from~\eqref{eq:rayleigh}, $\Delta t \propto E^{-1/2}$, so restoring a
+realistic stiffness would divide the time step by about $100$ and multiply the
+run time accordingly.  From~\eqref{eq:delta-static},
+$\delta_{n}\propto E^{-2/3}$, so the softening inflates the overlaps by a factor
+of about $460$ at a given load.  When a quantitative stress--strain response is
+required, the modulus must be raised until the results become insensitive to it,
+which is the softening-convergence study that any serious application should
+include.
+
+\subsection{Other sources of error}
+
+\begin{itemize}[leftmargin=1.6em]
+  \item \emph{Time-step error}: halving $\Delta t$ should change the packing
+        statistics by less than the run-to-run scatter due to the random seed.
+        Because a granular assembly is chaotic, individual trajectories will
+        never converge; only ensemble quantities (porosity, coordination number,
+        load--displacement curve) do.
+  \item \emph{Tangential history rotation}: the projection
+        \eqref{eq:xi-project} does not conserve the magnitude of
+        $\boldsymbol{\xi}$ when the contact plane rotates quickly; the error is
+        $O(\Delta t^{2})$ per step but accumulates in long-lived rolling
+        contacts.
+  \item \emph{Absence of rolling resistance}: a two-dimensional assembly of
+        smooth discs is unrealistically free to roll, which under-predicts the
+        shear strength and the angle of repose.  Adding a rolling-friction
+        torque is the single most valuable extension of the present model.
+  \item \emph{Boundary effects}: with $B/\bar{d}\approx 8$ grain diameters
+        across, wall friction carries a significant share of the applied load
+        (Janssen effect), and the measured platen reaction is not a pure
+        material property.  A wider box or periodic lateral boundaries are
+        required for constitutive characterisation.
+  \item \emph{Two dimensions}: force chains in 2D are more percolating and the
+        packing fraction is systematically higher than in 3D; results transfer
+        qualitatively, not quantitatively.
+\end{itemize}
