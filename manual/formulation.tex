@@ -686,6 +686,231 @@ The rise time, or the time scale of any other history, must be long compared
 with the characteristic contact time~\eqref{eq:tc}, otherwise the response is
 dynamic rather than quasi-static.
 
+\section{Pore water}
+\label{sec:water}
+
+Optionally, the particles can be immersed in water below a horizontal free
+surface, the water table, at height $y_{w}(t)$.  Two levels of coupling between
+the water and the particles are available.  With \emph{drained} water the pore
+pressure stays hydrostatic and any flow through the packing is prescribed; the
+water acts on the particles through buoyancy and the force of the water flowing
+past them.  With \emph{coupled} water an excess pore pressure is solved in
+addition (Section~\ref{sec:coupled-water}): it builds up when the skeleton
+changes volume faster than the water can flow in or out, and dissipates by flow,
+so undrained loading and consolidation can be modelled.  In both cases the
+forces of the water are added to the right-hand side of~\eqref{eq:newton},
+\begin{equation}
+  m_{i}\,\ddot{\mathbf{x}}_{i}
+    = \sum_{j\in\mathcal{C}_{i}} \mathbf{F}_{ij}
+     + \sum_{w\in\mathcal{W}_{i}} \mathbf{F}_{iw}
+     + m_{i}\,\mathbf{g}
+     + \mathbf{F}_{i}^{\,b} + \mathbf{F}_{i}^{\,f} + \mathbf{F}_{i}^{\,p},
+  \label{eq:newton-water}
+\end{equation}
+with the buoyancy $\mathbf{F}^{\,b}$, the flow force $\mathbf{F}^{\,f}$ and, for
+coupled water, the excess pore pressure force $\mathbf{F}^{\,p}$.  The contact
+forces in~\eqref{eq:newton-water} are then the intergranular forces that make up
+the \emph{effective} stress: a submerged packing at rest presses on its floor
+with its buoyant weight, not with its weight.
+
+\subsection{Buoyancy}
+
+A sphere whose lowest point lies a depth $h$ below the free surface displaces
+the volume of a spherical cap,
+\begin{equation}
+  V_{i}^{\,w} = \frac{\pi h^{2}\,(3R_{i}-h)}{3},
+  \qquad h = \min\bigl(\max(y_{w}-y_{i}+R_{i},\,0),\ 2R_{i}\bigr),
+  \label{eq:cap}
+\end{equation}
+and the hydrostatic pressure pushes it up with
+\begin{equation}
+  \mathbf{F}_{i}^{\,b} = \rho_{w}\,g\,V_{i}^{\,w}\,\mathbf{e}_{y}.
+  \label{eq:buoyancy}
+\end{equation}
+Because~\eqref{eq:cap} is continuous, a particle crossing the free surface feels
+no jump in force, and a particle lighter than water floats at the depth where
+$V_{i}^{\,w}=m_{i}/\rho_{w}$.
+
+\subsection{Flow past the particles}
+
+The drag of water moving at the interstitial velocity $\mathbf{u}$ past a sphere
+surrounded by others is given by the correlation of Di
+Felice~\cite{difelice1994}, which extends the drag on an isolated sphere through
+the local porosity $\varepsilon$:
+\begin{equation}
+  \mathbf{F}_{i}^{\,d} =
+     \tfrac{1}{2}\,C_{D}\,\rho_{w}\,\pi R_{i}^{2}\,\varepsilon^{2-\chi}\,
+     \lVert\mathbf{u}-\mathbf{v}_{i}\rVert\,(\mathbf{u}-\mathbf{v}_{i}),
+  \label{eq:drag}
+\end{equation}
+with the drag coefficient of an isolated sphere~\cite{dallavalle1948}, the
+particle Reynolds number and the crowding exponent
+\begin{equation}
+  C_{D} = \Bigl(0.63 + \frac{4.8}{\sqrt{Re}}\Bigr)^{2},
+  \qquad
+  Re = \frac{\rho_{w}\,2R_{i}\,\varepsilon\,\lVert\mathbf{u}-\mathbf{v}_{i}\rVert}{\mu_{w}},
+  \qquad
+  \chi = 3.7 - 0.65\exp\!\Bigl(-\tfrac{1}{2}\bigl(1.5-\log_{10}Re\bigr)^{2}\Bigr),
+  \label{eq:drag-cd}
+\end{equation}
+where $\mu_{w}$ is the dynamic viscosity.  For an isolated sphere
+($\varepsilon=1$) at vanishing Reynolds number,~\eqref{eq:drag} tends to
+$0.96\cdot 6\pi\mu_{w}R_{i}\lVert\mathbf{u}-\mathbf{v}_{i}\rVert$, \num{96}\% of
+Stokes' law; at large Reynolds number $C_{D}\to0.40$.  In a dense packing the
+factor $\varepsilon^{2-\chi}$, with $\chi$ between \num{3.05} and \num{3.7}, raises
+the drag several times, which reproduces hindered settling and the permeability
+of a packed bed.
+
+The drag is not the whole force of a flow through a packing.  To pass through
+the pores the water needs a pressure gradient, and that gradient also pushes on
+the volume of the particles.  For a uniform flow the momentum balance of the
+water, which has negligible inertia, reads $-\varepsilon\nabla p = n\,
+\mathbf{F}^{\,d}$ per unit volume, with $n=(1-\varepsilon)/V_{i}$ particles per
+unit volume; the pressure gradient then pushes on each particle with
+$-V_{i}\nabla p = \frac{1-\varepsilon}{\varepsilon}\mathbf{F}^{\,d}$, and the two
+together are~\cite{zhou2010}
+\begin{equation}
+  \mathbf{F}_{i}^{\,f} = \frac{V_{i}^{\,w}}{V_{i}}\;\frac{\mathbf{F}_{i}^{\,d}}{\varepsilon}.
+  \label{eq:interaction}
+\end{equation}
+The factor $V_{i}^{\,w}/V_{i}$ scales the force on a particle cut by the free
+surface.  For an isolated particle $\varepsilon\to1$ and~\eqref{eq:interaction}
+reduces to the drag; in a dense packing ($\varepsilon\approx0.4$) it is more than
+twice the drag.
+
+\subsection{Porosity of a planar packing}
+
+The drag correlation was established for packings of spheres, while the
+porosity that can be measured in the model is that of a planar layer of discs,
+$\varepsilon_{2D}$, which is much lower for the same arrangement (a dense
+two-dimensional packing has $\varepsilon_{2D}\approx0.17$).  The two are related
+by~\cite{hoomans1996}
+\begin{equation}
+  \varepsilon = 1 - \frac{2}{\sqrt{\sqrt{3}\,\pi}}\,\bigl(1-\varepsilon_{2D}\bigr)^{3/2},
+  \label{eq:porosity3d}
+\end{equation}
+which maps the hexagonal close packing of discs onto the face-centred cubic
+packing of spheres ($\varepsilon=0.2595$) and an empty layer onto pure water.
+The local $\varepsilon_{2D}$ is averaged over cells of about two particle
+diameters (Section~\ref{sec:water-numerics}).
+
+\subsection{Seepage}
+
+A vertical flow can be imposed through the packing, given by its superficial
+(Darcy) velocity $U(t)$, positive upwards.  The flux is carried by the pore
+space, so the interstitial velocity is
+\begin{equation}
+  \mathbf{u} = \frac{U(t)}{\varepsilon}\,\mathbf{e}_{y}.
+  \label{eq:interstitial}
+\end{equation}
+The flow is uniform, as in a permeameter whose floor and top let the water
+through; it is not deflected by walls or particles.  An upward flow reduces the
+effective weight of the packing.  It carries the packing entirely once its force
+on the fixed bed equals the buoyant weight,
+\begin{equation}
+  \sum_{i}\mathbf{F}_{i}^{\,f}(U_{mf})\cdot\mathbf{e}_{y}
+  = \sum_{i}\bigl(\rho_{s}-\rho_{w}\bigr)\,V_{i}\,g ,
+  \label{eq:umf}
+\end{equation}
+which defines the minimum fluidization velocity $U_{mf}$.  In soil mechanics this
+is the quick condition, reached when the hydraulic gradient across the bed
+equals the critical gradient $i_{c}=(\rho_{s}/\rho_{w}-1)(1-\varepsilon)$.  The
+water level $y_{w}$ and the superficial velocity $U$ may both vary in time, to
+model a rising water table, a drawdown or a gradually increasing flow.
+
+\subsection{Coupled pore pressure}
+\label{sec:coupled-water}
+
+With coupled water the excess pore pressure $p$, above hydrostatic, is solved on
+the porosity grid.  In a dense packing the water in the pores moves with the
+skeleton, at the local mean solid velocity $\bar{\mathbf{v}}_{s}$, except for the
+flux $\mathbf{q}$ relative to the solid that Darcy's law drives through the
+pores.  Mass conservation of a slightly compressible water, of bulk modulus
+$K_{w}$, then gives the Biot storage equation
+\begin{equation}
+  \frac{\varepsilon}{K_{w}}\,\frac{\partial p}{\partial t}
+  = -\nabla\cdot\mathbf{c} + \nabla\cdot\Bigl(\frac{k}{\mu_{w}}\nabla p\Bigr),
+  \qquad
+  \mathbf{c} = \bigl(1-\varepsilon+\varepsilon\lambda\bigr)\,\bar{\mathbf{v}}_{s},
+  \qquad
+  \mathbf{q} = -\frac{k}{\mu_{w}}\nabla p .
+  \label{eq:biot}
+\end{equation}
+Here $\mathbf{c}$ is the volume of solid and water that the skeleton carries
+through a unit area per unit time.  Where the skeleton compresses,
+$\nabla\cdot\mathbf{c}<0$, the excess pressure rises; it then drives water out
+through the pores and dissipates.  The permeability is the one that the flow
+force~\eqref{eq:interaction} implies at low Reynolds number: equating the
+Darcy pressure gradient $\mu_{w}\mathbf{q}/k$ with the force per unit volume
+$n\,\mathbf{F}^{\,f}$ of the flow $\mathbf{q}/\varepsilon$ gives
+\begin{equation}
+  k = \frac{4}{3\cdot5.76}\;R_{32}^{2}\;\frac{\varepsilon^{4.7}}{1-\varepsilon},
+  \label{eq:permeability}
+\end{equation}
+with $R_{32}$ the local Sauter mean radius, so that a fixed bed offers the same
+resistance in the drained and in the coupled model.  For $\varepsilon=0.4$,
+\eqref{eq:permeability} is about \num{1.3} times the Kozeny--Carman
+permeability $d^{2}\varepsilon^{3}/(180(1-\varepsilon)^{2})$.  The excess pressure pushes on each particle in
+proportion to the volume of mixture it represents,
+\begin{equation}
+  \mathbf{F}_{i}^{\,p} = -\frac{V_{i}^{\,w}}{1-\varepsilon}\,\nabla p ,
+  \label{eq:pressure-force}
+\end{equation}
+so that per unit volume the skeleton receives the whole gradient $-\nabla p$, as
+in the mixture theory of saturated soils.  The flow force~\eqref{eq:interaction}
+is then evaluated with the velocity of the water carried along by the skeleton,
+$\mathbf{u}=\lambda\bar{\mathbf{v}}_{s}+U/\varepsilon\,\mathbf{e}_{y}$, so that it
+acts only on particles that move relative to their neighbours.
+
+\paragraph{Dense and dilute regions.}  A coarse-grid average cannot represent a
+particle that moves alone through clear water: the grid would spread its
+velocity over the whole cell and let the water follow it.  The share $\lambda$
+of the pore water carried by the skeleton therefore depends on the solid
+fraction $\phi=1-\varepsilon$: all of it in a dense packing ($\phi\ge0.5$), none of
+it in a suspension ($\phi\le0.2$), and linearly in between.  A particle settling
+alone in clear water is then dragged by still water exactly as in the drained
+model, and the excess pressure there vanishes because the permeability of
+nearly empty cells is very large.
+
+\paragraph{Boundary conditions.}  The walls are impermeable.  Loaded platens are
+permeable, like porous stones, so that the water can drain through them.  The
+excess pressure vanishes above the free surface and next to open edges, where
+the water can leave the domain.
+
+\paragraph{Undrained response and scaling.}  Under a load applied faster than the
+water can drain, the water carries the load: the excess pressure rises by the
+fraction $B=1/(1+\varepsilon M/K_{w})$ of the stress increment, Skempton's
+coefficient, with $M$ the constrained modulus of the skeleton.  Like the Young's
+modulus of the particles, $K_{w}$ is scaled down (default
+\qty{10}{\mega\pascal}) to keep the time step affordable
+(Section~\ref{sec:water-numerics}); it only needs to stay large compared with $M$
+for $B$ to remain close to one.  Grains of a few millimetres drain far faster
+than a sand, because the permeability~\eqref{eq:permeability} grows with the
+square of the grain size.  Since $k$ enters only as $k/\mu_{w}$, a viscosity $N$
+times that of water makes the packing behave like a soil $N$ times less
+permeable, for the flow force, the settling of particles and the pore pressure
+alike.
+
+\subsection{Assumptions and limitations}
+
+\begin{itemize}[leftmargin=1.6em]
+  \item \emph{Darcy flow.}  The excess pressure drives a Darcy flow, which is
+        valid at small pore Reynolds numbers; the inertial part of the drag
+        enters only through the flow force~\eqref{eq:interaction}.
+  \item \emph{Dense--dilute transition.}  The carried share $\lambda$ is a
+        modelling assumption that joins the two limits in which the model is
+        well founded, the porous medium and the isolated particle.
+  \item \emph{Forces on the boundaries.}  The walls and platens are thin and
+        surrounded by water on both sides when submerged, so the hydrostatic
+        pressure on them cancels; they receive only the contact forces of the
+        particles, i.e.\ the effective forces.
+  \item \emph{Neglected interactions.}  The added mass, the history (Basset)
+        force, lift and the torque of the water on a spinning particle are
+        neglected, as are lubrication forces between approaching particles and
+        capillary forces at the free surface.  Contacts keep their dry
+        properties under water.
+\end{itemize}
+
 \section{Energy balance}
 \label{sec:energy}
 

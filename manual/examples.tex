@@ -4,9 +4,10 @@
 This chapter validates the implementation against closed-form solutions,
 quantifies the accuracy of the contact model in a controlled single-collision
 experiment, applies the model to the full deposition--compression problem of
-Section~\ref{sec:problem}, and finally to two problems with general geometry: a
-strip footing in a trapezoidal container and a curved indenter in a stepped
-container.  Every number reported here was produced
+Section~\ref{sec:problem}, to two problems with general geometry -- a strip
+footing in a trapezoidal container and a curved indenter in a stepped
+container -- and finally to submerged columns, fluidized by upward seepage and
+consolidated under a sudden load.  Every number reported here was produced
 with the code in this repository; the commands needed to reproduce them are
 given with each example.
 
@@ -17,7 +18,7 @@ The automated test suite is executed with
 \begin{verbatim}
   python -m pytest tests/ -q
 \end{verbatim}
-and contains \num{112} tests, grouped by module, which include checks that
+and contains \num{147} tests, grouped by module, which include checks that
 invalid input is rejected with a specific message.  The four examples below each
 isolate one equation of Chapter~\ref{cha:formulation}.  Further tests compare
 complete simulations with closed-form results: the static Hertz overlap of a
@@ -732,6 +733,267 @@ irreversible penetration.
   \label{fig:indenter-load}
 \end{figure}
 
+\section{Pore water}
+\label{sec:water-examples}
+
+\subsection{Verification}
+
+The test suite checks the water model against closed-form results: a submerged
+particle resting on a wall presses on it with its buoyant weight, a particle of
+half the density of water floats with its centre at the free surface, a rising
+water table reduces the contact force of a resting particle from its weight to
+its buoyant weight, the drag tends to \num{96}\% of Stokes' law at vanishing
+Reynolds number, a square lattice of discs has porosity $1-\pi/4$ also next to
+the walls, and an upward flow lifts a single particle once its superficial
+velocity exceeds the particle's settling velocity.  In water \num{e5} times more
+viscous, where the drag would make an explicit step unstable, a particle settles
+at the default time step exactly at its Stokes-regime terminal velocity.  For
+coupled water, the pressure solver reproduces Terzaghi's dissipation of a
+uniform excess pressure to within \num{1}\% of its initial value, a column under
+a sudden load passes it from the water to the skeleton as the excess pressure
+dissipates, and a particle settling alone in clear water is unaffected by the
+coupling.
+
+The settling of single particles over a wide range of sizes is reported in
+Table~\ref{tab:settling}, produced with
+\begin{verbatim}
+  python manual/scripts/water.py
+\end{verbatim}
+A sphere of density \qty{2500}{\kilogram\per\cubic\metre} is released from rest
+in still water and its speed after a few acceleration times is compared with the
+terminal velocity at which the flow force~\eqref{eq:interaction} balances its
+buoyant weight.
+The two agree to better than \num{0.02}\% from a Reynolds number of \num{0.7} to
+\num{6400}, which verifies buoyancy, drag and their time integration together.
+The Stokes velocity $2(\rho_{s}-\rho_{w})gR^{2}/(9\mu_{w})$ is \num{18}\% too
+high already for the finest grains, and overestimates the settling of millimetre
+grains by more than an order of magnitude: at those sizes the drag is dominated
+by inertia, which the correlation captures.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Terminal settling velocity of a single sphere in still water,
+  $\rho_{s}=\qty{2500}{\kilogram\per\cubic\metre}$.}
+  \label{tab:settling}
+  \begin{tabular}{S[table-format=1.2]S[table-format=1.4e-1]S[table-format=1.4e-1]S[table-format=-1.3]S[table-format=4.1]S[table-format=1.3e1]}
+    \toprule
+    {$R$ [\unit{\milli\metre}]} & {simulated [\unit{\metre\per\second}]} &
+    {drag balance [\unit{\metre\per\second}]} & {difference [\%]} & {$Re$} &
+    {Stokes [\unit{\metre\per\second}]} \\
+    \midrule
+    0.05 & 6.9204e-3 & 6.9215e-3 & -0.017 &    0.7 & 8.175e-3 \\
+    0.25 & 6.8218e-2 & 6.8219e-2 & -0.001 &   34.1 & 2.044e-1 \\
+    0.50 & 1.3410e-1 & 1.3410e-1 &  0.000 &  134   & 8.175e-1 \\
+    1.00 & 2.3231e-1 & 2.3231e-1 &  0.000 &  465   & 3.270e0 \\
+    2.50 & 4.2677e-1 & 4.2677e-1 &  0.000 & 2130   & 2.044e1 \\
+    5.00 & 6.4203e-1 & 6.4203e-1 &  0.001 & 6420   & 8.175e1 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Upward seepage: from the quick condition to fluidization}
+
+The script \texttt{examples/upward\_seepage.py} reproduces the classical
+permeameter experiment.  A box \qty{0.2}{\metre} wide and \qty{0.5}{\metre} high,
+with a rough floor, smooth side walls ($\mu_{w}=0$, so that wall friction does
+not carry part of the bed) and an open top, is filled with water up to
+$y_{w}=\qty{0.45}{\metre}$.  Particles of the reference material with radii in
+$[4,6]$~\unit{\milli\metre} are rained into the water up to an insertion band at
+$y\in[0.24,0.25]$~\unit{\metre}, which gives \num{502} particles, a bed top at
+\qty{0.252}{\metre} and a mean porosity of \num{0.395}.  An upward flow is then
+ramped linearly from zero to twice the minimum fluidization
+velocity~\eqref{eq:umf} of the settled bed, $U_{mf}=\qty{0.0634}{\metre\per\second}$,
+over \qty{4}{\second}:
+\begin{verbatim}
+  start = sim.time
+  sim.set_water(Water(level=0.45, seepage_velocity=TimeHistory(
+      [start, start + 4.0], [0.0, 2.0 * u_mf])))
+\end{verbatim}
+
+\paragraph{Effective stress at rest.}  Before the flow starts, the force of the
+bed on the floor, averaged over \qty{0.1}{\second}, is
+$\qty{4.071}{\newton}\pm\qty{0.025}{\newton}$, against a buoyant weight of
+\qty{4.070}{\newton}: the floor carries exactly the buoyant weight, \num{60}\% of
+the dry weight of \qty{6.783}{\newton}.  The contact forces are the effective
+forces, and the water carries the rest.
+
+\paragraph{Fluidization velocity.}  For the same mean porosity and Sauter mean
+diameter, Ergun's equation for the pressure drop through a packed bed gives a
+minimum fluidization velocity of \qty{0.0707}{\metre\per\second}; the model's
+fixed-bed value is \num{10}\% lower.  Ergun's equation is an independent,
+empirical description of packed beds, so this agreement checks the flow
+force~\eqref{eq:interaction} as a whole, including the pressure gradient that it
+adds to the drag: with the drag alone, the force on this bed would be smaller by
+the factor $\varepsilon\approx0.4$ and $U_{mf}$ correspondingly higher.
+
+\paragraph{Fluidization.}  Figure~\ref{fig:fluidization} shows how the force on
+the floor, normalised by the buoyant weight, falls as the flow increases, and
+compares it with the fixed-bed estimate $1-\sum F^{\,f}/W'$, the force that the
+same flow would exert on the particles if they did not move.  Up to half of
+$U_{mf}$ the two agree to within \num{1}\% of $W'$ (Table~\ref{tab:fluidization}).
+Closer to $U_{mf}$ the floor carries more than the estimate: as its effective
+weight decreases the bed dilates slightly, its porosity rising from \num{0.395}
+to \num{0.403} at $U_{mf}$, and the flow force on the looser bed is lower.  The
+force on the floor falls to \num{2}\% of $W'$ at about $1.1\,U_{mf}$, when the bed
+starts to lift; a residual of a few per cent, from particles wedged against the
+floor, persists up to $1.5\,U_{mf}$.  Beyond fluidization the bed expands
+steadily: its top rises from \qty{0.252}{\metre} to \qty{0.297}{\metre} at
+$2\,U_{mf}$ and its mean porosity grows to \num{0.51}.  The expanded bed is not
+uniform: particles circulate and its surface domes
+(Figure~\ref{fig:seepage-snapshots}), the onset of the heterogeneous flow of real
+fluidized beds.  No particle is carried out of the column, since even the
+smallest settle alone at \qty{0.56}{\metre\per\second}, \num{4.5} times the
+largest flow.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Force on the floor during the seepage ramp, as a fraction of the
+  buoyant weight $W'$, compared with the fixed-bed estimate.}
+  \label{tab:fluidization}
+  \begin{tabular}{S[table-format=1.2]S[table-format=1.3]S[table-format=1.3]S[table-format=1.3]S[table-format=3.1]}
+    \toprule
+    {$U/U_{mf}$} & {simulated} & {fixed bed} & {porosity} & {bed top [\unit{\milli\metre}]} \\
+    \midrule
+    0.25 & 0.927 & 0.925 & 0.396 & 251.8 \\
+    0.50 & 0.741 & 0.733 & 0.397 & 252.1 \\
+    0.75 & 0.461 & 0.424 & 0.399 & 252.7 \\
+    1.00 & 0.128 & 0.000 & 0.403 & 253.9 \\
+    1.10 & 0.024 & {--} & 0.406 & 254.6 \\
+    1.25 & 0.036 & {--} & 0.421 & 258.3 \\
+    1.50 & 0.019 & {--} & 0.453 & 269.7 \\
+    1.75 & 0.005 & {--} & 0.479 & 280.5 \\
+    2.00 & 0.009 & {--} & 0.508 & 296.5 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/seepage_fluidization.png}
+  \caption{Upward seepage through the submerged column.  Left: force on the
+  floor over the buoyant weight against the superficial velocity, with the
+  fixed-bed estimate.  Right: height of the top of the bed.}
+  \label{fig:fluidization}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{subfigure}[b]{0.4\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/seepage_start.png}
+    \caption{settled under water, before the flow}
+  \end{subfigure}
+  \hspace{2em}
+  \begin{subfigure}[b]{0.4\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/seepage_end.png}
+    \caption{fluidized, at $U=2\,U_{mf}$}
+  \end{subfigure}
+  \caption{The submerged column (water in blue) before the upward flow and at
+  the end of the ramp.}
+  \label{fig:seepage-snapshots}
+\end{figure}
+
+\subsection{Undrained loading and consolidation}
+\label{sec:consolidation}
+
+The script \texttt{examples/consolidation.py} reproduces the oedometer test of a
+saturated soil.  A box \qty{0.2}{\metre} wide, with a rough, impermeable floor and
+smooth side walls, holds water up to $y_{w}=\qty{0.38}{\metre}$; its top edge is a
+loaded platen of mass \qty{0.5}{\kilogram}, which lets the water through like a
+porous stone (Figure~\ref{fig:consolidation-column}).  Particles of the reference
+material with radii in $[4,6]$~\unit{\milli\metre} are rained into drained water
+up to an insertion band at $y\in[0.20,0.21]$~\unit{\metre}, which gives \num{423}
+particles, a column of height $H=\qty{0.213}{\metre}$ and a mean porosity of
+\num{0.401}.  The water is then coupled and made a thousand times more viscous
+than water, $\mu_{w}=\qty{1}{\pascal\second}$, so that these grains drain like a
+soil a thousand times less permeable, and a load of \qty{20}{\newton} is applied in
+\qty{0.01}{\second}:
+\begin{verbatim}
+  sim.set_water(Water(level=0.38, coupled=True, viscosity=1.0))
+  sim.compress(3.0)
+\end{verbatim}
+With $K_{w}=\qty{10}{\mega\pascal}$ the coupling limits the time step to
+\qty{6.7e-5}{\second} (Section~\ref{sec:water-numerics}), and the run takes about
+\qty{100}{\second}.  The results are produced with
+\begin{verbatim}
+  python manual/scripts/pore_pressure.py
+\end{verbatim}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.38\textwidth]{figures/consolidation_column.png}
+  \caption{The column at the end of the consolidation test: water (blue) up to
+  the water table, the loaded platen (red) on top of the column.}
+  \label{fig:consolidation-column}
+\end{figure}
+
+\paragraph{Undrained response.}  Before loading, the floor carries
+\qty{3.39}{\newton}, \num{99}\% of the buoyant weight of the column.  When the
+load is applied the skeleton cannot compress without expelling water, and the
+water takes the load: \qty{0.06}{\second} after loading the floor has received
+only \num{1.6}\% of it.  For a moment the platen, pushing on almost
+incompressible water, makes the pressure ring, with a peak of
+\qty{16.5}{\kilo\pascal} at the base; after \qty{0.1}{\second} the pressure decays
+smoothly.  Fitted from \qty{0.15}{\second} on, the initial excess pressure of
+Terzaghi's theory is $p_{0}=\qty{12.1}{\kilo\pascal}$, \num{12}\% above the load
+divided by the area of mixture it acts on, $FH/\sum_{i}V_{i}/(1-\varepsilon_{i})
+=\qty{10.7}{\kilo\pascal}$, an estimate that ignores the variation of porosity
+along the column.  With the constrained modulus measured below, Skempton's
+coefficient is $B=1/(1+\varepsilon M/K_{w})=\num{0.988}$: the scaled bulk modulus of
+the water is still large enough for a practically undrained response.
+
+\paragraph{Consolidation.}  The excess pressure then dissipates through the top
+of the column, and the load passes from the water to the skeleton
+(Figure~\ref{fig:consolidation}, Table~\ref{tab:consolidation}).  Fitting
+Terzaghi's base pressure for the coefficient of consolidation gives
+$c_{v}=\qty{0.0265}{\metre\squared\per\second}$, with which the base pressure, the
+share of the load on the floor and the settlement follow the theory closely.  The
+fitted coefficient can be checked against a prediction from the ingredients of
+the model.  The settlement during consolidation, \qty{7.9}{\milli\metre}, gives a
+constrained modulus $M=p_{0}H/s_{c}=\qty{0.33}{\mega\pascal}$, and with the
+permeability~\eqref{eq:permeability} at the mean porosity and Sauter radius of
+the column, $c_{v}=(k/\mu_{w})/(1/M+\varepsilon/K_{w})=\qty{0.0247}{\metre\squared\per\second}$,
+\num{7}\% below the fitted value.  The pressure profiles
+(Figure~\ref{fig:consolidation}, right) show the one systematic difference: the
+column drains faster near its top than Terzaghi's uniform layer, because the
+packing is looser there and the permeability grows steeply with the porosity,
+as $\varepsilon^{4.7}/(1-\varepsilon)$.  Of the final settlement of
+\qty{12.6}{\milli\metre}, \qty{4.9}{\milli\metre} occur immediately -- the
+seating of the platen and the compression of the water -- and the rest during
+consolidation.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Consolidation of the column under \qty{20}{\newton}, with
+  $H=\qty{0.213}{\metre}$, $c_{v}=\qty{0.0265}{\metre\squared\per\second}$ and
+  $p_{0}=\qty{12.1}{\kilo\pascal}$.}
+  \label{tab:consolidation}
+  \begin{tabular}{S[table-format=1.2]S[table-format=1.3]S[table-format=1.3]S[table-format=1.3]S[table-format=1.3]S[table-format=2.2]}
+    \toprule
+    {$t$ [\unit{\second}]} & {$T=c_{v}t/H^{2}$} & {base $p/p_{0}$} &
+    {Terzaghi} & {load on floor} & {settlement [\unit{\milli\metre}]} \\
+    \midrule
+    0.30 & 0.174 & 0.822 & 0.819 & 0.136 &  8.52 \\
+    0.60 & 0.349 & 0.556 & 0.538 & 0.421 & 10.19 \\
+    1.20 & 0.697 & 0.222 & 0.228 & 0.771 & 11.74 \\
+    2.40 & 1.395 & 0.036 & 0.041 & 0.964 & 12.52 \\
+    3.00 & 1.743 & 0.016 & 0.017 & 0.985 & 12.60 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/consolidation.png}
+  \caption{Consolidation of the submerged column compared with Terzaghi's theory.
+  Left: excess pore pressure at the base and share of the load carried by the
+  floor.  Middle: settlement of the platen.  Right: excess pore pressure along
+  the column at five times (dots: model; lines: theory).  The early spike of the
+  base pressure is the platen ringing on the nearly incompressible water.}
+  \label{fig:consolidation}
+\end{figure}
+
 \section{Suggested further studies}
 \label{sec:further}
 
@@ -771,4 +1033,25 @@ natural next steps and are directly supported by the existing interfaces.
         the applied load.  Repeating the loading with smooth side walls
         (\texttt{Wall(friction=0.0)}) and with wider boxes would separate the
         response of the packing from that of the container.
+  \item \textbf{Deposition under water.}  Rain the reference box dry and under
+        water and compare the packings.  Drag slows the particles before
+        impact, which should change the area fraction, the coordination number
+        and the stiffness of the packing.
+  \item \textbf{Submerged footing.}  Repeat the bearing test of
+        Section~\ref{sec:footing} with the water table above the fill.  If the
+        capacity scales with the unit weight of the fill, it should fall to
+        about \num{60}\% of the dry value, the ratio of buoyant to dry weight.
+  \item \textbf{Downward seepage and changing water tables.}  A downward flow
+        ($U<0$) increases the effective stress and should compact the bed; a
+        rising or falling water table changes it in the same way, but without
+        flow.
+  \item \textbf{Liquefaction.}  Apply a \texttt{Sinusoidal} load to a loose
+        packing in coupled, viscous water.  If the skeleton tends to
+        contract, the excess pore pressure should accumulate from cycle to cycle
+        until the effective stress, measured on the floor, vanishes.  Comparing
+        loose and dense packings would show the role of dilatancy.
+  \item \textbf{Two-way coupled flow.}  The coupled model solves the excess
+        pressure but not the motion of the water itself.  Dilute, fast flows --
+        a bed fluidized well beyond $U_{mf}$, a sediment plume -- would need the
+        locally averaged Navier--Stokes equations solved on the grid instead.
 \end{enumerate}

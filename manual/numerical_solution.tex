@@ -32,7 +32,10 @@ the remainder of the chapter.
         (Section~\ref{sec:coupling})
   \item \emph{Force evaluation}
     \begin{enumerate}[leftmargin=1.6em,nosep,label=(\alph*)]
-      \item reset $\mathbf{F}_{i}$, $T_{i}$; add gravity $-m_{i}g\,\mathbf{e}_{y}$;
+      \item reset $\mathbf{F}_{i}$, $T_{i}$; add gravity $-m_{i}g\,\mathbf{e}_{y}$
+            and, with water, buoyancy and the pore pressure force; advance the
+            pore pressure and evaluate the drag coefficients
+            (Section~\ref{sec:water-numerics});
       \item rebuild the neighbour list if a particle has moved more than half
             the skin since the last build (Section~\ref{sec:verlet});
       \item for all candidate pairs at once: exact overlap
@@ -541,6 +544,111 @@ $\epsilon=\qty{1e-6}{\joule}$ and a mean grain mass of about
 $\sqrt{2\epsilon/\bar{m}}\approx\qty{1e-2}{\metre\per\second}$, i.e.\ two orders
 of magnitude below the raining velocity.
 
+\section{Pore water}
+\label{sec:water-numerics}
+
+\paragraph{Porosity grid.}  The local porosity is averaged on a uniform grid of
+square cells of side $h_{\varepsilon}$, by default two largest particle
+diameters ($4R_{\max}$), so that each cell holds several particles.  With the
+cloud-in-cell weights $w_{ik}$ -- the bilinear weights of the four grid nodes $k$
+around the centre of particle $i$ -- every particle spreads its disc area over
+the nodes, and the area of the domain around each node, $A^{d}_{k}$, is spread
+in the same way from a fine sampling of the domain ($8\times8$ points per cell)
+computed once.  The disc-layer porosity at particle $i$ is then
+\begin{equation}
+  \varepsilon_{2D,i} = 1 - \frac{\sum_{k} w_{ik}\,A^{s}_{k}}{\sum_{k} w_{ik}\,A^{d}_{k}},
+  \qquad A^{s}_{k} = \sum_{j} w_{jk}\,\pi R_{j}^{2}.
+  \label{eq:cic}
+\end{equation}
+Interpolating the solid and the domain areas separately keeps nodes that lie
+outside the domain, or are cut by a wall, from biasing the result: a regular
+lattice gives its exact porosity also next to the walls.  The value is converted
+with~\eqref{eq:porosity3d} and bounded below by $\varepsilon_{\min}=0.2$, because
+overlapping particles can make a dense packing look denser than any real one.
+
+\paragraph{Implicit drag.}  The flow force~\eqref{eq:interaction} is written as
+$\beta_{i}(\mathbf{u}_{i}-\mathbf{v}_{i})$, with a coefficient $\beta_{i}$ that the
+correlation~\eqref{eq:drag-cd} keeps finite as the relative speed vanishes.  The
+coefficient and the water velocity are evaluated with the other forces, and the
+two half kicks of Algorithm~1 take the velocity at their end,
+\begin{equation}
+  \mathbf{v}_{i} \leftarrow
+  \frac{\mathbf{v}_{i} + \tfrac{\Delta t}{2m_{i}}\bigl(\mathbf{F}_{i}+\beta_{i}\mathbf{u}_{i}\bigr)}
+       {1+\tfrac{\Delta t}{2m_{i}}\beta_{i}},
+  \label{eq:implicit-drag}
+\end{equation}
+where $\mathbf{F}_{i}$ holds all the other forces.  The update is stable however
+strong the drag, which matters for fine grains and for viscous water: in a dense
+packing at vanishing Reynolds number the drag would otherwise limit the time
+step to about $m_{i}\varepsilon^{3.7}/(5.76\pi\mu_{w}R_{i})$.  At steady state it
+reproduces the force balance exactly, which is why the settling velocities of
+Section~\ref{sec:water-examples} agree with the drag balance to a few parts in
+$10^{4}$.
+
+\paragraph{Pore pressure.}  For coupled water every grid node with a domain area
+is a control volume for~\eqref{eq:biot}.  Two neighbouring nodes exchange water
+through a face of length $h_{\varepsilon}$ times the fraction of the face that
+lies in the domain, with the harmonic mean of their mobilities $k/\mu_{w}$, as
+for two resistances in series; faces to nodes outside the domain are closed,
+which makes the walls impermeable.  The carried flux $\mathbf{c}$ at a node is
+built from the solid-volume-weighted mean velocity of the particles around it,
+and its net outflow from each control volume is the source of~\eqref{eq:biot}.
+The diffusion is integrated with backward Euler,
+\begin{equation}
+  \Bigl(\frac{S}{\Delta t}+L\Bigr)\,\mathbf{p}^{\,n+1}
+  = \frac{S}{\Delta t}\,\mathbf{p}^{\,n} - \mathbf{D},
+  \label{eq:pressure-update}
+\end{equation}
+with the storage $S=\mathrm{diag}(A^{d}_{k}\varepsilon_{k}/K_{w})$, the
+conductance matrix $L$ and the outflow $\mathbf{D}$; nodes above the free surface
+or next to an open edge are held at $p=0$.  The update is unconditionally stable,
+whatever the permeability.  The system is symmetric and positive definite and is
+solved at every step by conjugate gradients with a diagonal preconditioner,
+started from the previous pressure, to a relative residual of $10^{-10}$.  The
+operator is applied face by face, so the solver needs no matrix, its cost grows
+only linearly with the number of nodes, and it avoids the dense linear algebra
+library, whose multithreaded routines can be slower than the whole time step on
+systems of a few hundred unknowns.  The porosity and the permeability are
+therefore always current.  The pressure gradient at each node
+is the mean of the gradients across its open faces, and is interpolated to the
+particles with the cloud-in-cell weights.  Like the tangential springs, the
+pressure advances only in the force evaluation that follows a drift.  On a
+column drained at the top, the solver reproduces Terzaghi's solution for the
+dissipation of a uniform excess pressure to within \num{1}\% of the initial
+value with ten cells over the column (Section~\ref{sec:water-examples}).
+
+\paragraph{Time step of the coupled model.}  The pressure force is explicit, so
+two time scales of the coupling must be resolved.  An undrained pressure wave
+travels at $c=\sqrt{K_{w}/(\varepsilon(1-\varepsilon)\rho_{s})}$, which the step must
+follow across a cell; and in viscous water the drained pressure stops a
+collective motion of the skeleton within the relaxation time
+$\tau_{p}=(1-\varepsilon)\rho_{s}k/\mu_{w}$.  The time step is therefore limited to
+\begin{equation}
+  \Delta t \le \min\Bigl(\tfrac{1}{2}\,h_{\varepsilon}\big/c(\varepsilon_{\min}),\;
+                        \tau_{p}(R_{\min},\,\varepsilon=0.35)\Bigr),
+  \label{eq:coupled-dt}
+\end{equation}
+the second term for the smallest particles in a dense packing.  For the
+consolidation example of Section~\ref{sec:water-examples}
+($K_{w}=\qty{10}{\mega\pascal}$, $\mu_{w}=\qty{1}{\pascal\second}$, $R_{\min}=\qty{4}{\milli\metre}$) the two limits are
+\qty{7.6e-5}{\second} and \qty{6.7e-5}{\second}, against a Rayleigh step of
+\qty{9.7e-5}{\second}.  A user-supplied $\Delta t$ that violates them is
+rejected; the default is reduced instead.  On a dense packing of \num{500}
+particles, drained water adds about a third to the cost of a step.  A coupled
+step costs about two and a half times a drained one, mostly for the pressure
+solution, which takes some \num{25} conjugate-gradient iterations in viscous
+water and some \num{55} in water of ordinary viscosity, where the excess pressure
+diffuses fastest.
+
+\paragraph{Stages.}  The water can be added, changed or removed between stages
+with \texttt{set\_water}, e.g.\ to deposit a packing in drained water and then
+load it with coupled water, or to start a seepage flow after deposition.  The
+level and the superficial velocity are functions of the simulation time, so a
+ramp that should start now is written relative to the current time.  The force
+that the particles exert on every edge of the domain, \texttt{edge\_forces}, is
+the effective force on that wall, and \texttt{excess\_pore\_pressure} samples the
+excess pore pressure at any point.
+
 \section{Recording and post-processing}
 \label{sec:recording}
 
@@ -549,12 +657,16 @@ Two output streams are collected at user-defined intervals.
 \begin{description}[leftmargin=1.6em,style=nextline]
   \item[Frames] \texttt{Frame} records
         $\bigl(t,\ \mathbf{x}_{i},\ R_{i},\ \lVert\mathbf{v}_{i}\rVert,\
-        \text{edges of the loaded bodies},\ \text{phase}\bigr)$ every
+        \text{edges of the loaded bodies},\ \text{phase},\ y_{w}\bigr)$ every
         \texttt{record\_every} steps.  Positions and radii are \emph{copied},
         not referenced, because the underlying arrays are overwritten in place
         and reallocated when particles are added or removed.  The phase label
         (\texttt{deposition}, \texttt{settling}, \texttt{loading}) is carried
         along so that the animation can be annotated.
+  \item[Edge forces] \texttt{edge\_forces}, the force the particles exert on every
+        edge of the domain at the last evaluation, available at any time; with
+        \texttt{fluid\_force} and \texttt{porosity}, the force of the water on
+        every particle and its local porosity.
   \item[Load curves] one \texttt{LoadCurve} per platen, with
         $\bigl(t,\ F(t),\ u_{p},\ F_{p}\bigr)$ recorded during the loading stage
         only, starting with the seated state at $t=0$.  Comparing $F(t)$ with

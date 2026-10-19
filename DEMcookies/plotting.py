@@ -4,14 +4,37 @@ from typing import List, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
+import numpy.typing as npt
 from matplotlib.animation import FuncAnimation, PillowWriter
 from matplotlib.artist import Artist
 from matplotlib.cm import ScalarMappable
 from matplotlib.collections import EllipseCollection, LineCollection
 from matplotlib.colors import Normalize
+from matplotlib.patches import Polygon
 
 from .boundary import LoadedPlaten, Open
 from .solver import DEMSimulation
+
+
+def _clip_below(vertices: npt.NDArray[np.float64], level: float) -> npt.NDArray[np.float64]:
+    """Clip a polygon to the half-plane below a horizontal line.
+
+    Args:
+        vertices: polygon vertices, shape (n, 2) [m].
+        level: height of the line [m].
+
+    Returns:
+        The vertices of the part of the polygon below the line, possibly none.
+    """
+    clipped = []
+    for start, end in zip(vertices, np.roll(vertices, -1, axis=0)):
+        start_below = start[1] <= level
+        if start_below:
+            clipped.append(start)
+        if start_below != (end[1] <= level):
+            t = (level - start[1]) / (end[1] - start[1])
+            clipped.append(start + t * (end - start))
+    return np.array(clipped, dtype=np.float64).reshape(-1, 2)
 
 
 def _edge_label(edges: Tuple[int, ...]) -> str:
@@ -72,6 +95,16 @@ class _FramePainter:
         for body in self.bodies:
             self.ax.add_collection(body)
         self.title = self.ax.set_title("")
+        self.vertices = geometry.vertices
+        self.water = Polygon(np.zeros((0, 2)),
+                             closed=True,
+                             facecolor="#6baed6",
+                             edgecolor="#2171b5",
+                             linewidth=1.2,
+                             alpha=0.55,
+                             zorder=0,
+                             visible=False)
+        self.ax.add_patch(self.water)
 
         mappable = ScalarMappable(norm=self.norm, cmap="viridis")
         mappable.set_array([])
@@ -107,8 +140,12 @@ class _FramePainter:
         self.particles.append(circles)
         for body, segments in zip(self.bodies, frame.platens):
             body.set_segments(list(segments))
+        if frame.water_level is not None:
+            wet = _clip_below(self.vertices, frame.water_level)
+            self.water.set_xy(wet if wet.shape[0] >= 3 else np.zeros((0, 2)))
+            self.water.set_visible(wet.shape[0] >= 3)
         self.title.set_text(f"{frame.phase}   t = {frame.time:.3f} s   N = {frame.radii.size}")
-        return [circles, self.title, *self.bodies]
+        return [circles, self.title, self.water, *self.bodies]
 
 
 def render_animation(sim: DEMSimulation, path: str, fps: int = 25) -> None:
