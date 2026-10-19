@@ -15,8 +15,15 @@ The automated test suite is executed with
 \begin{verbatim}
   python -m pytest tests/ -q
 \end{verbatim}
-and consists of four tests, each isolating one equation of
-Chapter~\ref{cha:formulation}.  All four pass.
+and contains \num{101} tests, grouped by module, which include checks that
+invalid input is rejected with a specific message.  The four examples below each
+isolate one equation of Chapter~\ref{cha:formulation}.  Further tests compare
+complete simulations with closed-form results: the static Hertz overlap of a
+particle resting on a wall, a single contact for a particle on or next to a
+vertex shared by two edges, conservation of momentum in an oblique collision,
+the equilibrium of a strip footing and of a platen on a side wall, the removal
+of particles through an open edge, and the filling of a trapezoidal domain.  All
+tests pass.
 
 \subsection{Example 1 -- free fall of a single body}
 
@@ -230,7 +237,18 @@ The complete experiment is run with
 \end{verbatim}
 which writes \texttt{output/simulation.gif} and
 \texttt{output/load\_displacement.png}.  The inputs are listed in
-Table~\ref{tab:refsetup}.
+Table~\ref{tab:refsetup}.  The top edge of the box is a loaded platen: it
+closes the box while it is filled and is seated on the bed when loading starts.
+
+\paragraph{Version of the results.}  The results in the remainder of this
+section and in Section~\ref{sec:load-level} were obtained with the first version
+of the code, before the corrections described in Sections~\ref{sec:history}
+and~\ref{sec:deposition}.  That version biased the packing towards small
+particles, as discussed below.  With the current code the box holds \num{179}
+particles with a mean radius of \qty{12.25}{\milli\metre}, so a fresh run of
+\texttt{main.py} does not reproduce Tables~\ref{tab:packing}
+to~\ref{tab:loadhistory} or the figures of these sections, which should be
+regenerated before they are quoted.
 
 \begin{table}[htbp]
   \centering
@@ -331,10 +349,9 @@ size (\num{192} particles below \qty{6}{\milli\metre} against a single one above
 Section~\ref{sec:deposition}: a large candidate is far more likely to overlap an
 existing grain and to exhaust its \num{30} placement attempts, so the acceptance
 probability decreases sharply with $R$.  The insertion procedure therefore
-biases the distribution.  This is harmless as long as one is aware of it, but a
-simulation that must honour a prescribed grading should either sample from the
-\emph{target} distribution and retry the same radius until it is placed, or
-insert the largest particles first.
+biases the distribution.  The current code removes this bias by drawing each
+radius once and retrying it, largest first, until it is placed
+(Section~\ref{sec:deposition}).
 
 \paragraph{The packing is dense and well connected.}  An area fraction of
 \num{0.840} and a coordination number of \num{3.67} are typical of a
@@ -390,7 +407,7 @@ excessive loading looks like.
 To quantify the previous statement, the identical packing (same seed, same
 deposition history) was compressed with a peak load of \qty{100}{\newton}
 instead of \qty{1000}{\newton}; the case is reproduced by setting
-\texttt{f\_max=100.0} in the \texttt{linear\_ramp} call of
+\texttt{amplitude=100.0} in the \texttt{Heaviside} load of
 \texttt{build\_simulation}.  The result is
 Figure~\ref{fig:loadcurve100} and Table~\ref{tab:loadlevels}.
 
@@ -473,6 +490,64 @@ platen is established the response becomes much stiffer and almost linear, with
 small load drops that correspond to local rearrangements -- the discrete
 analogue of the yielding events observed in real granular assemblies.
 
+\section{Strip footing in a trapezoidal container}
+\label{sec:footing}
+
+The script \texttt{examples/footing\_on\_trapezoid.py} exercises the general
+input: a non-rectangular domain, a different boundary condition on the edges, a
+load applied to part of a side only, and a choice of load histories.  The
+container is the trapezoid with vertices $(0.05,0)$, $(0.35,0)$, $(0.40,0.25)$
+and $(0,0.25)$~\unit{\metre}, which widens upwards.  Its bottom and left side
+are rough walls and its right side is a smooth wall ($\mu_{w}=0$).  The top side
+is split into three collinear edges: the outer two are open, and the middle one,
+\qty{0.1}{\metre} wide, is a loaded platen of mass \qty{0.3}{\kilogram} that acts
+as a rigid strip footing.
+\begin{verbatim}
+  vertices = [(0.05, 0.0), (0.35, 0.0), (0.40, 0.25),
+              (0.25, 0.25), (0.15, 0.25), (0.00, 0.25)]
+  boundary_conditions = [Wall(), Wall(friction=0.0), Open(),
+                         LoadedPlaten(load=load, mass=0.3), Open(), Wall()]
+  geometry = Geometry(vertices, boundary_conditions)
+\end{verbatim}
+The container is rained full with radii in $[4,8]$~\unit{\milli\metre} up to an
+insertion band at $y\in[0.19,0.20]$~\unit{\metre}, which gives \num{482}
+particles and leaves about \qty{5}{\centi\metre} of freeboard; the footing is
+seated on the fill when loading starts.  A command-line argument selects one of
+four load histories -- a pulse, a Heaviside step, a sinusoid, or a time history
+that loads, partly unloads and reloads -- with peaks of \qtyrange{5}{6}{\newton}.
+
+These levels were chosen after loading the footing with a slow ramp to
+\qty{20}{\newton} over \qty{2}{\second} (Table~\ref{tab:footing}).  The response
+stiffens up to about \qty{8}{\newton}, at a settlement of
+\qty{10}{\milli\metre}.  Between \qty{10}{\newton} and \qty{12}{\newton} the
+settlement jumps from \qty{20}{\milli\metre} to \qty{76}{\milli\metre}, and the
+footing punches into the fill while material flows around its ends and over it.
+The bearing capacity is therefore about \qty{10}{\newton}, and the example loads
+stay at about half of it.  A capacity this low is expected from soft, frictional
+discs without rolling resistance (Section~\ref{sec:limitations}).
+
+\begin{table}[htbp]
+  \centering
+  \caption{Settlement of the strip footing under a slow ramp to
+  \qty{20}{\newton} over \qty{2}{\second}.}
+  \label{tab:footing}
+  \begin{tabular}{S[table-format=2.0]S[table-format=3.2]}
+    \toprule
+    {$F$ [\unit{\newton}]} & {$u_{p}$ [\unit{\milli\metre}]} \\
+    \midrule
+     1 &   2.26 \\
+     2 &   3.94 \\
+     4 &   6.52 \\
+     6 &   8.21 \\
+     8 &   9.74 \\
+    10 &  19.66 \\
+    12 &  75.80 \\
+    14 & 108.11 \\
+    16 & 126.39 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
 \section{Suggested further studies}
 \label{sec:further}
 
@@ -496,9 +571,10 @@ natural next steps and are directly supported by the existing interfaces.
         area fraction should decrease with $\mu$ (friction supports looser
         packings) and the compressive stiffness should increase, because wall
         friction carries a growing share of the load.
-  \item \textbf{Unloading.}  Set \texttt{hold=False} in
-        \texttt{linear\_ramp}~\eqref{eq:ramp} to release the load after the
-        ramp, and measure the irrecoverable displacement.  The area enclosed by
+  \item \textbf{Unloading.}  Replace the ramped Heaviside
+        load~\eqref{eq:ramp} by a \texttt{TimeHistory} that ramps up and back
+        down, e.g.\ \texttt{TimeHistory([0, 0.4, 0.8], [0, 1000, 0])}, and
+        measure the irrecoverable displacement.  The area enclosed by
         the loading--unloading loop is the energy dissipated by friction and by
         rearrangement, and is a far more discriminating validation target than
         the loading branch alone.

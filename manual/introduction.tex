@@ -140,6 +140,16 @@ fixed, the test is an \emph{oedometric} (one-dimensional, laterally confined)
 compression.  The recorded platen displacement and reaction force yield the
 macroscopic load--displacement response of the packing.
 
+\paragraph{Other problems.}
+The rectangular box is one instance of a more general set-up.  The domain may be
+any simple polygon, each of its edges is a fixed wall (rough or smooth), an open
+boundary through which particles can leave, or a loaded platen, and every
+platen follows its own load history: a pulse, a Heaviside step (optionally
+ramped), a sinusoid or a user-defined time history.  The location at which a
+load is applied is set by the geometry, so a strip footing is modelled by
+splitting the top side into collinear edges and loading only the middle one
+(Section~\ref{sec:walls}).
+
 \section{Structure of the package}
 \label{sec:structure}
 
@@ -160,20 +170,36 @@ manual (Table~\ref{tab:modules}).
       \texttt{rayleigh\_time\_step} &
       Sections~\ref{sec:normal}--\ref{sec:tangential},
       Section~\ref{sec:timestep} \\
+    \texttt{geometry.py} &
+      \texttt{Geometry} (polygonal domain) &
+      Section~\ref{sec:domain} \\
     \texttt{boundary.py} &
-      \texttt{Box}, \texttt{LoadingPlaten}, \texttt{linear\_ramp} &
+      \texttt{Wall}, \texttt{Open}, \texttt{LoadedPlaten}, \texttt{Platen} &
       Sections~\ref{sec:walls}--\ref{sec:platen} \\
+    \texttt{loads.py} &
+      \texttt{Pulse}, \texttt{Heaviside}, \texttt{Sinusoidal},
+      \texttt{TimeHistory} &
+      Section~\ref{sec:platen} \\
+    \texttt{neighbours.py} &
+      cell grid, \texttt{NeighbourList} &
+      Section~\ref{sec:broadphase} \\
     \texttt{particle\_generation.py} &
-      \texttt{Particle}, \texttt{generate\_rain\_particles} &
+      \texttt{Particle}, \texttt{generate\_lattice\_particles} &
       Section~\ref{sec:deposition} \\
     \texttt{solver.py} &
-      \texttt{VelocityVerlet}, \texttt{DEMSimulation} &
+      \texttt{VelocityVerlet}, \texttt{DEMSimulation}, \texttt{RainSettings} &
       Chapter~\ref{cha:numerical} \\
-    \texttt{main.py} &
-      driver script, animation, load curve &
+    \texttt{globals.py} &
+      constants, \texttt{GlobalSettings} &
+      Chapter~\ref{cha:numerical} \\
+    \texttt{plotting.py} &
+      animation, load curves &
+      Section~\ref{sec:recording} \\
+    \texttt{main.py}, \texttt{examples/} &
+      driver scripts &
       Chapter~\ref{cha:examples} \\
-    \texttt{tests/test\_solver.py} &
-      unit verification tests &
+    \texttt{tests/} &
+      unit and verification tests &
       Section~\ref{sec:unit-tests} \\
     \bottomrule
   \end{tabular}
@@ -196,10 +222,11 @@ mind when interpreting results.
         than as a plane-strain slice of a cylinder
         (see Section~\ref{sec:massprops}).
   \item \textbf{Single material.}  All particles and all boundaries share the
-        same density, Young's modulus, Poisson ratio, restitution coefficient
-        and friction coefficient.  The effective contact constants $E^{*}$,
-        $G^{*}$, $\beta$ and $\mu$ are therefore evaluated once at construction
-        time.
+        same density, Young's modulus, Poisson ratio and restitution
+        coefficient, so the effective contact constants $E^{*}$, $G^{*}$ and
+        $\beta$ are evaluated once at construction time.  The friction
+        coefficient is that of the material, but may be overridden for each
+        wall or platen.
   \item \textbf{Small overlaps.}  The Hertz--Mindlin law is a small-strain
         elastic solution.  It is quantitatively valid only while the overlap
         remains a small fraction of the particle radius
@@ -209,9 +236,10 @@ mind when interpreting results.
         liquid bridges, rolling friction and particle breakage are not modelled.
   \item \textbf{Dry system.}  There is no interstitial fluid: no drag, no
         buoyancy, no pore pressure.
-  \item \textbf{Rigid boundaries.}  Walls are perfectly rigid, flat half-spaces
-        of infinite mass and infinite radius; the platen is rigid but has a
-        finite mass and one translational degree of freedom.
+  \item \textbf{Rigid boundaries.}  Walls are perfectly rigid, straight
+        segments of infinite mass and infinite radius; a platen is rigid but has
+        a finite mass and one translational degree of freedom, along the normal
+        of its edge.
 \end{enumerate}
 
 \section{Notation}
@@ -233,7 +261,8 @@ Table~\ref{tab:notation} collects the symbols used throughout the manual.
     Symbol & Meaning & Unit & Code name \\
     \midrule
     $N$              & number of particles              & --                   & \texttt{sim.n} \\
-    $B,\ L$          & box width and height             & \unit{\metre}        & \texttt{box.width}, \texttt{box.height} \\
+    $B,\ L$          & box width and height             & \unit{\metre}        & \texttt{Geometry.rectangle} \\
+    $\mathbf{p}_{k}$, $\mathbf{n}_{k}$ & vertex, inward edge normal & \unit{\metre}, -- & \texttt{vertices}, \texttt{inward\_normals} \\
     $\mathbf{x}_{i}$ & particle centre                  & \unit{\metre}        & \texttt{pos[i]} \\
     $\mathbf{v}_{i}$ & particle velocity                & \unit{\metre\per\second} & \texttt{vel[i]} \\
     $\omega_{i}$     & angular velocity ($z$)           & \unit{\radian\per\second} & \texttt{omega[i]} \\
@@ -247,18 +276,19 @@ Table~\ref{tab:notation} collects the symbols used throughout the manual.
     $E^{*},\ G^{*}$  & effective contact moduli         & \unit{\pascal}       & \texttt{e\_star}, \texttt{g\_star} \\
     $e$              & coefficient of restitution       & --                   & \texttt{restitution} \\
     $\beta$          & damping ratio derived from $e$   & --                   & \texttt{beta} \\
-    $\mu$            & Coulomb friction coefficient     & --                   & \texttt{mu} \\
+    $\mu$            & Coulomb friction coefficient     & --                   & \texttt{friction} \\
     $g$              & gravitational acceleration       & \unit{\metre\per\second\squared} & \texttt{gravity} \\
-    $\delta_{n}$     & normal overlap                   & \unit{\metre}        & \texttt{delta} \\
-    $\mathbf{n},\ \mathbf{t}$ & contact normal and tangent & --                 & \texttt{nx,ny}, \texttt{tpx,tpy} \\
-    $R^{*},\ m^{*}$  & effective radius and mass        & \unit{\metre}, \unit{\kilogram} & \texttt{r\_eff}, \texttt{m\_eff} \\
+    $\delta_{n}$     & normal overlap                   & \unit{\metre}        & \texttt{overlap} \\
+    $\mathbf{n},\ \mathbf{t}$ & contact normal and tangent & --                 & \texttt{normal}, \texttt{tangent} \\
+    $R^{*},\ m^{*}$  & effective radius and mass        & \unit{\metre}, \unit{\kilogram} & \texttt{effective\_radius}, \texttt{\_mass} \\
     $S_{n},\ S_{t}$  & normal, tangential stiffness     & \unit{\newton\per\metre} & \texttt{s\_n}, \texttt{s\_t} \\
-    $\boldsymbol{\xi}$ & tangential displacement        & \unit{\metre}        & \texttt{xi\_x, xi\_y} \\
-    $\mathbf{F}_{n},\ \mathbf{F}_{t}$ & contact force components & \unit{\newton} & \texttt{f\_n}, \texttt{ftx,fty} \\
+    $\boldsymbol{\xi}$ & tangential displacement        & \unit{\metre}        & \texttt{tangential\_spring} \\
+    $\mathbf{F}_{n},\ \mathbf{F}_{t}$ & contact force components & \unit{\newton} & \texttt{f\_n}, \texttt{f\_t} \\
     $T_{i}$          & torque on particle $i$           & \unit{\newton\metre} & \texttt{torque[i]} \\
-    $y_{p},\ v_{p}$  & platen position and velocity     & \unit{\metre}, \unit{\metre\per\second} & \texttt{platen.y}, \texttt{platen.vy} \\
-    $m_{p}$          & platen mass                      & \unit{\kilogram}     & \texttt{platen.mass} \\
-    $F(t)$           & prescribed external load         & \unit{\newton}       & \texttt{load\_fn} \\
+    $s_{p},\ v_{p}$  & platen translation, velocity     & \unit{\metre}, \unit{\metre\per\second} & \texttt{platen.offset}, \texttt{.velocity} \\
+    $u_{p},\ F_{p}$  & platen displacement, reaction    & \unit{\metre}, \unit{\newton} & \texttt{platen.displacement}, \texttt{.reaction} \\
+    $m_{p}$          & platen mass                      & \unit{\kilogram}     & \texttt{LoadedPlaten.mass} \\
+    $F(t)$           & prescribed external load         & \unit{\newton}       & \texttt{LoadedPlaten.load} \\
     $\Delta t$       & time step                        & \unit{\second}       & \texttt{sim.dt} \\
     $T_{R}$          & Rayleigh critical time step      & \unit{\second}       & \texttt{rayleigh\_time\_step} \\
     \bottomrule

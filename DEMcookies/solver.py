@@ -1,438 +1,769 @@
 """Time integration and the DEM simulation engine.
 
-``VelocityVerlet`` is a small, self-contained integrator used in the tests.
-``DEMSimulation`` is the full engine: it builds the particle state arrays,
-detects contacts with a uniform-grid (cell list) broad phase, evaluates the
-Hertz-Mindlin forces against neighbouring particles, the three fixed walls and
-the loading platen, and advances everything in time.
+``VelocityVerlet`` is a small, self-contained integrator used to verify the scheme. ``DEMSimulation`` is the full
+engine: it keeps the particle state in arrays, finds particle contacts with a cell grid and a Verlet neighbour list,
+evaluates the Hertz-Mindlin forces between particles and against the solid edges of the domain, moves the loaded
+platens, and advances everything in time with velocity Verlet.
 """
 
-from __future__ import annotations
-
 import math
-from typing import Callable, Optional
+from dataclasses import dataclass, field
+from typing import Callable, List, Optional, Sequence, Tuple
 
 import numpy as np
+import numpy.typing as npt
 
-from .boundary import Box, LoadingPlaten
+from .boundary import LoadedPlaten, Open, Platen
 from .contact import HertzMindlinModel, MaterialProperties, rayleigh_time_step
+from .geometry import Geometry, project_onto_segments
+from .globals import ESCAPE_CHECK_INTERVAL, GEOMETRY_TOLERANCE, VERTEX_TOLERANCE, GlobalSettings
+from .neighbours import NeighbourList
 from .particle_generation import Particle
-
-# half-stencil of neighbouring cells so every pair is visited exactly once
-_NEIGHBOUR_OFFSETS = ((1, 0), (0, 1), (1, 1), (-1, 1))
 
 
 class VelocityVerlet:
     """Canonical velocity-Verlet integrator for an acceleration callback."""
 
-    def __init__(self, dt: float):
+    def __init__(self, dt: float) -> None:
+        """Create the integrator.
+
+        Args:
+            dt: time step [s].
+
+        Raises:
+            ValueError: if the time step is not positive.
+        """
+        if dt <= 0.0:
+            raise ValueError(f"dt must be positive, got {dt}.")
         self.dt = float(dt)
 
-    def step(self, pos: np.ndarray, vel: np.ndarray,
-             acceleration: Callable[[np.ndarray, np.ndarray], np.ndarray]):
-        """Advance ``pos``/``vel`` by one step.
+    def step(
+        self, positions: npt.NDArray[np.float64], velocities: npt.NDArray[np.float64],
+        acceleration: Callable[[npt.NDArray[np.float64], npt.NDArray[np.float64]], npt.NDArray[np.float64]]
+    ) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Advance the positions and velocities by one step.
 
-        ``acceleration(pos, vel)`` must return the acceleration array.
-        Returns the new position, velocity and acceleration.
+        Args:
+            positions: current positions [m].
+            velocities: current velocities [m/s].
+            acceleration: function of the positions and velocities that returns the accelerations [m/s^2].
+
+        Returns:
+            The new positions, velocities and accelerations.
         """
         dt = self.dt
-        a0 = acceleration(pos, vel)
-        vel_half = vel + 0.5 * a0 * dt
-        pos_new = pos + vel_half * dt
-        a1 = acceleration(pos_new, vel_half)
-        vel_new = vel_half + 0.5 * a1 * dt
-        return pos_new, vel_new, a1
+        a0 = acceleration(positions, velocities)
+        half_velocities = velocities + 0.5 * a0 * dt
+        new_positions = positions + half_velocities * dt
+        a1 = acceleration(new_positions, half_velocities)
+        new_velocities = half_velocities + 0.5 * a1 * dt
+        return new_positions, new_velocities, a1
+
+
+@dataclass(frozen=True)
+class RainSettings:
+    """Settings of the wave-by-wave raining deposition.
+
+    Attributes:
+        batch_size: number of particles inserted per wave.
+        steps_between: time steps between two waves.
+        patience: number of consecutive waves without any insertion after which the domain is full.
+        attempts: random positions tried per particle and wave.
+        rain_speed: initial downward speed of the inserted particles [m/s].
+        insertion_band: lowest and highest y of the inserted particle centres [m]; None uses a band one largest
+            radius below the top of the domain.
+        settle_steps: largest number of time steps of the final settling stage.
+        settle_min_steps: number of settling steps before the packing may be declared at rest.
+        max_particles: largest number of particles.
+        max_steps: largest number of time steps of the raining stage.
+        record_every: number of time steps between two recorded frames.
+        seed: seed of the random generator.
+    """
+
+    batch_size: int = 15
+    steps_between: int = 450
+    patience: int = 4
+    attempts: int = 30
+    rain_speed: float = 0.3
+    insertion_band: Optional[Tuple[float, float]] = None
+    settle_steps: int = 4000
+    settle_min_steps: int = 500
+    max_particles: int = 2000
+    max_steps: int = 300000
+    record_every: int = 60
+    seed: int = 0
+
+    def __post_init__(self) -> None:
+        """Validate the settings.
+
+        Raises:
+            ValueError: if a count that must be positive is not.
+            ValueError: if a count that must be non-negative is negative.
+            ValueError: if the insertion band is empty.
+        """
+        for name in ("batch_size", "steps_between", "patience", "attempts", "max_particles", "record_every"):
+            if getattr(self, name) < 1:
+                raise ValueError(f"{name} must be at least 1, got {getattr(self, name)}.")
+        for name in ("settle_steps", "settle_min_steps", "max_steps"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"{name} must be non-negative, got {getattr(self, name)}.")
+        if self.insertion_band is not None and self.insertion_band[0] >= self.insertion_band[1]:
+            raise ValueError(f"insertion_band must be (y_min, y_max) with y_min < y_max, got {self.insertion_band}.")
+
+
+@dataclass(frozen=True, eq=False)
+class Frame:
+    """Snapshot of the simulation for post-processing.
+
+    Attributes:
+        time: simulation time [s].
+        positions: particle centres, shape (n, 2) [m].
+        radii: particle radii [m].
+        speeds: particle speeds [m/s].
+        platens: current (start, end) points of every platen, each of shape (2, 2) [m].
+        phase: name of the stage the frame belongs to.
+    """
+
+    time: float
+    positions: npt.NDArray[np.float64]
+    radii: npt.NDArray[np.float64]
+    speeds: npt.NDArray[np.float64]
+    platens: Tuple[npt.NDArray[np.float64], ...]
+    phase: str
+
+
+@dataclass
+class LoadCurve:
+    """Load history recorded for one platen.
+
+    Attributes:
+        edge: index of the geometry edge of the platen.
+        time: time since loading started [s].
+        applied: applied load [N].
+        displacement: platen translation into the domain since loading started [m].
+        reaction: contact force with which the particles push the platen back, along its outward normal [N].
+    """
+
+    edge: int
+    time: List[float] = field(default_factory=list)
+    applied: List[float] = field(default_factory=list)
+    displacement: List[float] = field(default_factory=list)
+    reaction: List[float] = field(default_factory=list)
+
+    def as_array(self) -> npt.NDArray[np.float64]:
+        """Return the curve as an array with columns time, applied, displacement and reaction."""
+        return np.column_stack((self.time, self.applied, self.displacement, self.reaction)).reshape(-1, 4)
 
 
 class DEMSimulation:
-    """A 2D discrete element simulation with Hertz-Mindlin contacts."""
+    """A 2D discrete element simulation with Hertz-Mindlin contacts in a polygonal domain."""
 
-    def __init__(self, box: Box, material: MaterialProperties,
-                 particles: list[Particle], platen: LoadingPlaten,
-                 load_fn: Callable[[float], float], gravity: float = 9.81,
-                 dt: Optional[float] = None, quiet_tol: float = 1e-6,
-                 radius_range: Optional[tuple[float, float]] = None):
-        self.box = box
+    def __init__(self,
+                 geometry: Geometry,
+                 material: MaterialProperties,
+                 radius_range: Optional[Tuple[float, float]] = None,
+                 particles: Optional[Sequence[Particle]] = None,
+                 settings: Optional[GlobalSettings] = None,
+                 dt: Optional[float] = None) -> None:
+        """Set up the simulation.
+
+        Args:
+            geometry: domain, with a boundary condition on every edge.
+            material: material shared by the particles and boundaries.
+            radius_range: smallest and largest radius of rained particles [m]; defaults to the range of the
+                initial particles.
+            particles: initial particles; the domain starts empty when None.
+            settings: numerical settings; defaults to ``GlobalSettings()``.
+            dt: time step [s]; defaults to a fraction of the Rayleigh time step of the smallest particle.
+
+        Raises:
+            ValueError: if neither a radius range nor particles are given.
+            ValueError: if the radius range is not 0 < r_min <= r_max.
+            ValueError: if a particle radius is not positive.
+            ValueError: if a particle centre lies outside the domain.
+            ValueError: if the time step is not positive.
+        """
+        self.geometry = geometry
         self.material = material
+        self.settings = settings or GlobalSettings()
         self.model = HertzMindlinModel(material)
-        self.platen = platen
-        self.load_fn = load_fn
-        self.g = gravity
-        self.quiet_tol = quiet_tol
-        self._rain_speed = 0.3          # initial downward speed of rained particles
 
-        self.n = len(particles)
-        if particles:
-            self.pos = np.array([[p.x, p.y] for p in particles], dtype=float)
-            self.vel = np.array([[p.vx, p.vy] for p in particles], dtype=float)
-            self.radius = np.array([p.radius for p in particles], dtype=float)
-        else:
-            self.pos = np.zeros((0, 2))
-            self.vel = np.zeros((0, 2))
-            self.radius = np.zeros(0)
-        self.omega = np.zeros(self.n)
+        initial = list(particles or [])
+        self.pos: npt.NDArray[np.float64] = np.array([[p.x, p.y] for p in initial], dtype=np.float64).reshape(-1, 2)
+        self.vel: npt.NDArray[np.float64] = np.array([[p.vx, p.vy] for p in initial], dtype=np.float64).reshape(-1, 2)
+        self.radius: npt.NDArray[np.float64] = np.array([p.radius for p in initial], dtype=np.float64)
+        if np.any(self.radius <= 0.0):
+            raise ValueError("Particle radii must be positive.")
+        if radius_range is None:
+            if not initial:
+                raise ValueError("radius_range is required when no initial particles are given.")
+            radius_range = (float(self.radius.min()), float(self.radius.max()))
+        if not 0.0 < radius_range[0] <= radius_range[1]:
+            raise ValueError(f"radius_range must satisfy 0 < r_min <= r_max, got {radius_range}.")
+        outside = np.flatnonzero(~geometry.contains(self.pos))
+        if outside.size:
+            x, y = self.pos[outside[0]]
+            raise ValueError(f"Particle {outside[0]} at ({x:.4g}, {y:.4g}) lies outside the domain.")
+        self.radius_range = (float(radius_range[0]), float(radius_range[1]))
 
-        if radius_range is not None:
-            self.r_min, self.r_max = float(radius_range[0]), float(radius_range[1])
-        else:
-            self.r_min = float(self.radius.min())
-            self.r_max = float(self.radius.max())
+        self.omega: npt.NDArray[np.float64] = np.zeros(self.n)
+        self.force: npt.NDArray[np.float64] = np.zeros((self.n, 2))
+        self.torque: npt.NDArray[np.float64] = np.zeros(self.n)
+        self.__update_mass_properties()
 
-        self.force = np.zeros((self.n, 2))
-        self.torque = np.zeros(self.n)
-        self._recompute_derived()
-
-        # tangential displacement history, keyed by contact
-        self.tangential: dict = {}
-
-        self.cell_size = 2.0 * self.r_max
-        self.dt = dt if dt is not None else rayleigh_time_step(material, self.r_min)
+        r_min = min([self.radius_range[0]] + ([float(self.radius.min())] if self.n else []))
+        r_max = max([self.radius_range[1]] + ([float(self.radius.max())] if self.n else []))
+        if dt is not None and dt <= 0.0:
+            raise ValueError(f"dt must be positive, got {dt}.")
+        self.dt = dt if dt is not None else rayleigh_time_step(material, r_min, self.settings.time_step_safety)
+        self.__gravity = np.array([0.0, -self.settings.gravity])
+        self.__escape_distance = self.settings.escape_margin * r_max
+        self.__neighbours = NeighbourList(self.settings.neighbour_skin * r_min)
+        self.__setup_boundaries()
+        self.__forces_valid = False
 
         self.time = 0.0
-        self.time_load = 0.0
+        self.load_time = 0.0
+        self.steps_taken = 0
+        self.n_removed = 0
+        self.frames: List[Frame] = []
+        self.load_curves = [LoadCurve(edge=p.edge) for p in self.platens]
 
-        # outputs
-        self.frames: list = []
-        self.load_curve: list = []
+    @property
+    def n(self) -> int:
+        """Number of particles in the simulation."""
+        return int(self.radius.size)
 
-    def _recompute_derived(self) -> None:
-        """Refresh mass/inertia after the particle set has changed."""
-        rho = self.material.density
-        self.mass = rho * (4.0 / 3.0) * math.pi * self.radius ** 3
-        self.inertia = 0.4 * self.mass * self.radius ** 2
+    # ------------------------------------------------------------------ #
+    #  Set-up                                                            #
+    # ------------------------------------------------------------------ #
+    def __setup_boundaries(self) -> None:
+        """Build the arrays of the solid edges (walls and platens) the particles can touch."""
+        conditions = self.geometry.boundary_conditions
+        n_edges = len(conditions)
+        starts = self.geometry.edge_starts
+        ends = self.geometry.edge_ends
+        normals = self.geometry.inward_normals
+
+        solid = [(edge, condition) for edge, condition in enumerate(conditions) if not isinstance(condition, Open)]
+        solid_edges = [edge for edge, _ in solid]
+        segment_of_edge = {edge: s for s, edge in enumerate(solid_edges)}
+        self.platens: List[Platen] = []
+        platen_of_segment = np.full(len(solid), -1, dtype=np.int64)
+        friction = np.empty(len(solid))
+        for s, (edge, condition) in enumerate(solid):
+            friction[s] = self.material.friction if condition.friction is None else condition.friction
+            if isinstance(condition, LoadedPlaten):
+                platen_of_segment[s] = len(self.platens)
+                self.platens.append(Platen(edge, condition, starts[edge], ends[edge], normals[edge]))
+
+        self.__has_open_edges = len(solid) < n_edges
+        self.__segment_starts = starts[solid_edges].reshape(-1, 2)
+        self.__segment_ends = ends[solid_edges].reshape(-1, 2)
+        self.__segment_normals = normals[solid_edges].reshape(-1, 2)
+        self.__segment_friction = friction
+        self.__platen_of_segment = platen_of_segment
+        self.__platen_segments = np.flatnonzero(platen_of_segment >= 0)
+        self.__previous_segment = np.array([segment_of_edge.get((edge - 1) % n_edges, -1) for edge in solid_edges],
+                                           dtype=np.int64)
+        self.__next_segment = np.array([segment_of_edge.get((edge + 1) % n_edges, -1) for edge in solid_edges],
+                                       dtype=np.int64)
+        self.__wall_spring: npt.NDArray[np.float64] = np.zeros((self.n, len(solid), 2))
+
+    def __update_mass_properties(self) -> None:
+        """Refresh mass and rotational inertia after the particle set has changed."""
+        # particles are spheres in a plane, see the manual for why not discs
+        self.mass = self.material.density * (4.0 / 3.0) * math.pi * self.radius**3
+        self.inertia = 0.4 * self.mass * self.radius**2
         self.inv_mass = 1.0 / self.mass
         self.inv_inertia = 1.0 / self.inertia
 
-    def _insert_rain_batch(self, batch_size: int, rng, attempts: int = 30) -> list:
-        """Try to drop ``batch_size`` new particles in a band near the top.
+    def __append_particles(self, positions: npt.NDArray[np.float64], radii: npt.NDArray[np.float64],
+                           velocities: npt.NDArray[np.float64]) -> None:
+        """Add particles at the end of the state arrays, so existing indices stay valid.
 
-        Returns the ``(x, y, radius)`` tuples that could be placed without
-        overlapping existing particles - an empty list means the top of the
-        box is blocked (i.e. the box is full).
+        Args:
+            positions: centres of the new particles, shape (m, 2) [m].
+            radii: radii of the new particles [m].
+            velocities: velocities of the new particles, shape (m, 2) [m/s].
         """
-        r_min, r_max = self.r_min, self.r_max
-        y_lo = self.box.height - 2.0 * r_max
-        y_hi = self.box.height - r_max
-        if self.n:
-            mask = self.pos[:, 1] > (y_lo - 2.0 * r_max)
-            top_pos = self.pos[mask]
-            top_rad = self.radius[mask]
-        else:
-            top_pos = np.zeros((0, 2))
-            top_rad = np.zeros(0)
+        m = radii.size
+        if m == 0:
+            return
+        self.pos = np.vstack((self.pos, positions))
+        self.vel = np.vstack((self.vel, velocities))
+        self.omega = np.concatenate((self.omega, np.zeros(m)))
+        self.radius = np.concatenate((self.radius, radii))
+        self.force = np.vstack((self.force, np.zeros((m, 2))))
+        self.torque = np.concatenate((self.torque, np.zeros(m)))
+        self.__wall_spring = np.concatenate((self.__wall_spring, np.zeros((m, ) + self.__wall_spring.shape[1:])))
+        self.__update_mass_properties()
+        self.__neighbours.invalidate()
+        self.__forces_valid = False
 
-        placed: list = []
-        for _ in range(batch_size):
-            for _attempt in range(attempts):
-                r = float(rng.uniform(r_min, r_max))
-                x = float(rng.uniform(r, self.box.width - r))
-                y = float(rng.uniform(y_lo, y_hi))
-                ok = True
-                if top_pos.shape[0]:
-                    dx = top_pos[:, 0] - x
-                    dy = top_pos[:, 1] - y
-                    sr = top_rad + r
-                    if np.any(dx * dx + dy * dy < sr * sr):
-                        ok = False
-                if ok:
-                    for px, py, pr in placed:
-                        if (px - x) ** 2 + (py - y) ** 2 < (pr + r) ** 2:
-                            ok = False
-                            break
-                if ok:
-                    placed.append((x, y, r))
-                    break
-        return placed
+    def __keep_particles(self, keep: npt.NDArray[np.bool_]) -> None:
+        """Remove particles from the state arrays.
 
-    def _append_particles(self, placed: list) -> int:
-        """Add the placed particles to the state arrays (indices grow at end)."""
-        if not placed:
-            return 0
-        m = len(placed)
-        new_pos = np.array([[x, y] for x, y, _ in placed], dtype=float)
-        new_rad = np.array([r for _, _, r in placed], dtype=float)
-        new_vel = np.zeros((m, 2))
-        new_vel[:, 1] = -self._rain_speed
-        self.pos = np.vstack([self.pos, new_pos])
-        self.vel = np.vstack([self.vel, new_vel])
-        self.omega = np.concatenate([self.omega, np.zeros(m)])
-        self.radius = np.concatenate([self.radius, new_rad])
-        self.force = np.vstack([self.force, np.zeros((m, 2))])
-        self.torque = np.concatenate([self.torque, np.zeros(m)])
-        self.n += m
-        self._recompute_derived()
-        return m
+        Args:
+            keep: True for every particle that stays in the simulation.
+        """
+        self.pos = self.pos[keep]
+        self.vel = self.vel[keep]
+        self.omega = self.omega[keep]
+        self.radius = self.radius[keep]
+        self.force = self.force[keep]
+        self.torque = self.torque[keep]
+        self.__wall_spring = self.__wall_spring[keep]
+        self.__update_mass_properties()
+        self.__neighbours.remove_particles(keep)
 
-    # ------------------------------------------------------------------ #
-    #  Broad phase                                                       #
-    # ------------------------------------------------------------------ #
-    def _candidate_pairs(self) -> list[tuple[int, int]]:
-        """Return candidate contact pairs using a uniform grid."""
-        inv = 1.0 / self.cell_size
-        pos = self.pos
-        cells: dict[tuple[int, int], list[int]] = {}
-        for idx in range(self.n):
-            key = (int(math.floor(pos[idx, 0] * inv)),
-                   int(math.floor(pos[idx, 1] * inv)))
-            cells.setdefault(key, []).append(idx)
-
-        pairs: list[tuple[int, int]] = []
-        for (cx, cy), members in cells.items():
-            m = len(members)
-            # within the same cell
-            for a in range(m):
-                ia = members[a]
-                for b in range(a + 1, m):
-                    pairs.append((ia, members[b]))
-            # towards half of the neighbouring cells
-            for ox, oy in _NEIGHBOUR_OFFSETS:
-                neighbour = cells.get((cx + ox, cy + oy))
-                if neighbour:
-                    for ia in members:
-                        for ib in neighbour:
-                            pairs.append((ia, ib))
-        return pairs
+    def __remove_escaped_particles(self) -> None:
+        """Remove the particles that left the domain and are farther than the escape distance from it."""
+        inside = self.geometry.contains(self.pos)
+        if np.all(inside):
+            return
+        outside = np.flatnonzero(~inside)
+        distance = self.geometry.distance_to_edges(self.pos[outside]).min(axis=1)
+        escaped = outside[distance > self.__escape_distance]
+        if escaped.size == 0:
+            return
+        keep = np.ones(self.n, dtype=bool)
+        keep[escaped] = False
+        self.__keep_particles(keep)
+        self.n_removed += int(escaped.size)
 
     # ------------------------------------------------------------------ #
     #  Force evaluation                                                  #
     # ------------------------------------------------------------------ #
     def compute_forces(self) -> None:
-        """Evaluate every force and torque for the current configuration."""
-        force = self.force
-        torque = self.torque
-        force[:] = 0.0
-        torque[:] = 0.0
-        force[:, 1] -= self.mass * self.g           # gravity
+        """Evaluate every force and torque for the current state, without advancing the tangential history."""
+        self.__evaluate_forces(accumulate=False)
 
-        pos = self.pos
-        vel = self.vel
-        rad = self.radius
-        om = self.omega
-        mass = self.mass
-        model = self.model
-        dt = self.dt
-        old_tan = self.tangential
-        new_tan: dict = {}
+    def __evaluate_forces(self, accumulate: bool) -> None:
+        """Evaluate every force and torque for the current state.
 
-        # --- particle / particle ----------------------------------------
-        for a, b in self._candidate_pairs():
-            i, j = (a, b) if a < b else (b, a)
-            dx = pos[i, 0] - pos[j, 0]
-            dy = pos[i, 1] - pos[j, 1]
-            dist = math.hypot(dx, dy)
-            delta = rad[i] + rad[j] - dist
-            if delta <= 0.0 or dist == 0.0:
-                continue
-            nx = dx / dist
-            ny = dy / dist
-            tpx = -ny
-            tpy = nx
-            spin = rad[i] * om[i] + rad[j] * om[j]
-            vrx = (vel[i, 0] - vel[j, 0]) - spin * tpx
-            vry = (vel[i, 1] - vel[j, 1]) - spin * tpy
-            r_eff = rad[i] * rad[j] / (rad[i] + rad[j])
-            m_eff = mass[i] * mass[j] / (mass[i] + mass[j])
-            key = ("pp", i, j)
-            xi = old_tan.get(key, (0.0, 0.0))
-            fx, fy, ftx, fty, xix, xiy = model.contact_force(
-                nx, ny, delta, vrx, vry, xi[0], xi[1], dt, r_eff, m_eff)
-            new_tan[key] = (xix, xiy)
-            force[i, 0] += fx
-            force[i, 1] += fy
-            force[j, 0] -= fx
-            force[j, 1] -= fy
-            cross = nx * fty - ny * ftx
-            torque[i] -= rad[i] * cross
-            torque[j] -= rad[j] * cross
+        Args:
+            accumulate: whether the relative sliding of the last time step is added to the tangential springs. Only
+                the evaluation that follows a drift may do so; a re-evaluation of the same state must not.
+        """
+        self.force[:] = 0.0
+        self.torque[:] = 0.0
+        self.force[:, 1] -= self.mass * self.settings.gravity
+        for platen in self.platens:
+            platen.reaction = 0.0
+        increment = self.dt if accumulate else 0.0
+        if self.n:
+            self.__particle_contacts(increment)
+            self.__boundary_contacts(increment)
+        self.__forces_valid = True
 
-        # --- particle / walls + platen ----------------------------------
-        b_width = self.box.width
-        platen = self.platen
-        platen_fy = 0.0
-        for i in range(self.n):
-            xi_, yi_ = pos[i, 0], pos[i, 1]
-            ri = rad[i]
-            # left wall (x = 0), outward normal +x
-            self._boundary_contact(i, 1.0, 0.0, ri - xi_, 0.0, 0.0,
-                                   ("wL", i), old_tan, new_tan)
-            # right wall (x = B), outward normal -x
-            self._boundary_contact(i, -1.0, 0.0, xi_ + ri - b_width, 0.0, 0.0,
-                                   ("wR", i), old_tan, new_tan)
-            # bottom wall (y = 0), outward normal +y
-            self._boundary_contact(i, 0.0, 1.0, ri - yi_, 0.0, 0.0,
-                                   ("wB", i), old_tan, new_tan)
-            # loading platen, normal pointing down onto the particle
+    def __particle_contacts(self, increment: float) -> None:
+        """Add the particle-particle contact forces.
+
+        Args:
+            increment: time over which the sliding velocity is accumulated into the tangential springs [s].
+        """
+        neighbours = self.__neighbours
+        neighbours.update(self.pos, self.radius)
+        first, second = neighbours.first, neighbours.second
+        if first.size == 0:
+            return
+        delta = self.pos[first] - self.pos[second]
+        dist_sq = np.einsum("ij,ij->i", delta, delta)
+        reach = self.radius[first] + self.radius[second]
+        touching = dist_sq < reach * reach
+        # a contact that opened loses its history, so a later re-closure starts from zero
+        neighbours.spring[~touching] = 0.0
+        contacts = np.flatnonzero(touching)
+        if contacts.size == 0:
+            return
+
+        i = first[contacts]
+        j = second[contacts]
+        dist = np.sqrt(dist_sq[contacts])
+        normal = np.tile([1.0, 0.0], (contacts.size, 1))
+        # coincident centres have no defined normal, so they keep the arbitrary +x direction
+        separated = dist > GEOMETRY_TOLERANCE * reach[contacts]
+        normal[separated] = delta[contacts][separated] / dist[separated, None]
+        tangent = np.column_stack((-normal[:, 1], normal[:, 0]))
+        spin = self.radius[i] * self.omega[i] + self.radius[j] * self.omega[j]
+        relative_velocity = self.vel[i] - self.vel[j] - spin[:, None] * tangent
+        radius_i, radius_j = self.radius[i], self.radius[j]
+        mass_i, mass_j = self.mass[i], self.mass[j]
+        result = self.model.evaluate(normal, reach[contacts] - dist, relative_velocity, neighbours.spring[contacts],
+                                     increment, radius_i * radius_j / (radius_i + radius_j),
+                                     mass_i * mass_j / (mass_i + mass_j))
+        neighbours.spring[contacts] = result.tangential_spring
+
+        n = self.n
+        force = result.force
+        self.force[:, 0] += np.bincount(i, force[:, 0], n) - np.bincount(j, force[:, 0], n)
+        self.force[:, 1] += np.bincount(i, force[:, 1], n) - np.bincount(j, force[:, 1], n)
+        # both bodies receive a torque of the same sign, like two meshing gears
+        cross = normal[:, 0] * result.tangential_force[:, 1] - normal[:, 1] * result.tangential_force[:, 0]
+        self.torque -= np.bincount(i, radius_i * cross, n) + np.bincount(j, radius_j * cross, n)
+
+    def __segment_state(self) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Return the current start points, end points and velocities of the solid edges."""
+        starts = self.__segment_starts.copy()
+        ends = self.__segment_ends.copy()
+        velocities = np.zeros_like(starts)
+        for segment, platen in zip(self.__platen_segments, self.platens):
+            starts[segment] = platen.start
+            ends[segment] = platen.end
             if platen.active:
-                delta_p = yi_ + ri - platen.y
-                if delta_p > 0.0:
-                    _, fyp = self._boundary_contact(
-                        i, 0.0, -1.0, delta_p, 0.0, platen.vy,
-                        ("pl", i), old_tan, new_tan)
-                    platen_fy -= fyp        # reaction on the platen (+y)
+                velocities[segment] = platen.velocity * platen.normal
+        return starts, ends, velocities
 
-        platen.fy = platen_fy
-        self.tangential = new_tan
+    def __redundant_vertex_contacts(self, t: npt.NDArray[np.float64], starts: npt.NDArray[np.float64],
+                                    ends: npt.NDArray[np.float64]) -> npt.NDArray[np.bool_]:
+        """Flag contacts with a vertex that another solid edge already accounts for.
 
-    def _boundary_contact(self, i: int, nx: float, ny: float, delta: float,
-                          vjx: float, vjy: float, key, old_tan: dict,
-                          new_tan: dict):
-        """Apply a Hertz-Mindlin contact between particle ``i`` and a boundary."""
-        if delta <= 0.0:
-            return 0.0, 0.0
-        rad = self.radius
-        om = self.omega
-        vel = self.vel
-        tpx = -ny
-        tpy = nx
-        spin = rad[i] * om[i]
-        vrx = (vel[i, 0] - vjx) - spin * tpx
-        vry = (vel[i, 1] - vjy) - spin * tpy
-        xi = old_tan.get(key, (0.0, 0.0))
-        fx, fy, ftx, fty, xix, xiy = self.model.contact_force(
-            nx, ny, delta, vrx, vry, xi[0], xi[1], self.dt, rad[i], self.mass[i])
-        new_tan[key] = (xix, xiy)
-        self.force[i, 0] += fx
-        self.force[i, 1] += fy
-        cross = nx * fty - ny * ftx
-        self.torque[i] -= rad[i] * cross
-        return fx, fy
+        A vertex shared by two solid edges belongs to both. If the closest point of one edge to a particle is the
+        shared vertex, the other edge either has a closer point of its own or reports the same vertex, so in both
+        cases the contact is already counted once by the other edge.
+
+        Args:
+            t: segment parameter of the closest point of every edge to every particle, shape (n, s).
+            starts: current start points of the solid edges, shape (s, 2) [m].
+            ends: current end points of the solid edges, shape (s, 2) [m].
+
+        Returns:
+            True for every (particle, edge) contact that must be ignored, shape (n, s).
+        """
+        previous = self.__previous_segment
+        has_previous = previous >= 0
+        shares_start = np.zeros(starts.shape[0], dtype=bool)
+        gap = ends[previous[has_previous]] - starts[has_previous]
+        shares_start[has_previous] = np.hypot(gap[:, 0], gap[:, 1]) <= GEOMETRY_TOLERANCE * self.radius_range[1]
+        following = self.__next_segment
+        shares_end = np.zeros_like(shares_start)
+        shares_end[following >= 0] = shares_start[following[following >= 0]]
+
+        # a start vertex is always left to the previous edge, which reports it too or has a closer point
+        redundant = (t <= VERTEX_TOLERANCE) & shares_start[None, :]
+        # an end vertex is kept only if the next edge reports that same vertex as its closest point
+        next_t = t[:, np.maximum(following, 0)]
+        redundant |= (t >= 1.0 - VERTEX_TOLERANCE) & shares_end[None, :] & (next_t > VERTEX_TOLERANCE)
+        return redundant
+
+    def __boundary_contacts(self, increment: float) -> None:
+        """Add the contact forces between the particles and the solid edges, and the reactions on the platens.
+
+        Args:
+            increment: time over which the sliding velocity is accumulated into the tangential springs [s].
+        """
+        if self.__segment_starts.shape[0] == 0:
+            return
+        starts, ends, velocities = self.__segment_state()
+        t, offset = project_onto_segments(self.pos, starts, ends)
+        dist_sq = offset[..., 0]**2 + offset[..., 1]**2
+        touching = dist_sq < (self.radius**2)[:, None]
+        touching &= ~self.__redundant_vertex_contacts(t, starts, ends)
+        self.__wall_spring[~touching] = 0.0
+        if not np.any(touching):
+            return
+
+        particle, segment = np.nonzero(touching)
+        dist = np.sqrt(dist_sq[particle, segment])
+        radius = self.radius[particle]
+        # a centre exactly on the edge has no defined normal, so it is pushed along the inward normal
+        normal = self.__segment_normals[segment].copy()
+        separated = dist > GEOMETRY_TOLERANCE * radius
+        normal[separated] = offset[particle[separated], segment[separated]] / dist[separated, None]
+        tangent = np.column_stack((-normal[:, 1], normal[:, 0]))
+        relative_velocity = (self.vel[particle] - velocities[segment] -
+                             (radius * self.omega[particle])[:, None] * tangent)
+        # a wall is a body of infinite radius and mass, so R* and m* reduce to the particle's
+        result = self.model.evaluate(normal, radius - dist, relative_velocity, self.__wall_spring[particle, segment],
+                                     increment, radius, self.mass[particle], self.__segment_friction[segment])
+        self.__wall_spring[particle, segment] = result.tangential_spring
+
+        n = self.n
+        force = result.force
+        self.force[:, 0] += np.bincount(particle, force[:, 0], n)
+        self.force[:, 1] += np.bincount(particle, force[:, 1], n)
+        cross = normal[:, 0] * result.tangential_force[:, 1] - normal[:, 1] * result.tangential_force[:, 0]
+        self.torque -= np.bincount(particle, radius * cross, n)
+
+        if self.platens:
+            platen = self.__platen_of_segment[segment]
+            on_platen = platen >= 0
+            if np.any(on_platen):
+                platen_normals = np.array([p.normal for p in self.platens])
+                # the particles push the platen back with the opposite of the force it exerts on them
+                along_normal = np.einsum("ij,ij->i", force[on_platen], platen_normals[platen[on_platen]])
+                reactions = np.bincount(platen[on_platen], along_normal, len(self.platens))
+                for p, reaction in zip(self.platens, reactions):
+                    p.reaction = float(reaction)
 
     # ------------------------------------------------------------------ #
     #  Time integration                                                  #
     # ------------------------------------------------------------------ #
-    def _platen_acceleration(self) -> float:
-        p = self.platen
-        applied = self.load_fn(self.time_load)
-        return (p.fy - applied - p.mass * p.gravity) / p.mass
-
     def step(self) -> None:
         """Advance the whole system by one velocity-Verlet step."""
+        if not self.__forces_valid:
+            self.__evaluate_forces(accumulate=False)
         dt = self.dt
         half = 0.5 * dt
-        platen = self.platen
+        active = [p for p in self.platens if p.active]
 
-        # first half kick (uses forces from the previous evaluation)
-        self.vel[:, 0] += half * self.force[:, 0] * self.inv_mass
-        self.vel[:, 1] += half * self.force[:, 1] * self.inv_mass
+        # first half kick, with the forces of the previous evaluation
+        self.vel += half * self.force * self.inv_mass[:, None]
         self.omega += half * self.torque * self.inv_inertia
-        if platen.active:
-            platen.vy += half * self._platen_acceleration()
+        for platen in active:
+            platen.velocity += half * platen.acceleration(self.load_time, self.__gravity)
 
         # drift
-        self.pos += self.vel * dt
-        if platen.active:
-            platen.y += platen.vy * dt
+        self.pos += dt * self.vel
+        for platen in active:
+            platen.offset += dt * platen.velocity
         self.time += dt
-        if platen.active:
-            self.time_load += dt
+        self.steps_taken += 1
+        if active:
+            self.load_time += dt
+        if self.__has_open_edges and self.steps_taken % ESCAPE_CHECK_INTERVAL == 0:
+            self.__remove_escaped_particles()
 
-        # new forces
-        self.compute_forces()
+        self.__evaluate_forces(accumulate=True)
 
-        # second half kick
-        self.vel[:, 0] += half * self.force[:, 0] * self.inv_mass
-        self.vel[:, 1] += half * self.force[:, 1] * self.inv_mass
+        # second half kick, with the new forces
+        self.vel += half * self.force * self.inv_mass[:, None]
         self.omega += half * self.torque * self.inv_inertia
-        if platen.active:
-            platen.vy += half * self._platen_acceleration()
+        for platen in active:
+            platen.velocity += half * platen.acceleration(self.load_time, self.__gravity)
 
     # ------------------------------------------------------------------ #
     #  Diagnostics and recording                                         #
     # ------------------------------------------------------------------ #
     def mean_kinetic_energy(self) -> float:
+        """Mean translational kinetic energy per particle [J]."""
         if self.n == 0:
             return 0.0
-        v2 = self.vel[:, 0] ** 2 + self.vel[:, 1] ** 2
-        return float(0.5 * np.sum(self.mass * v2) / self.n)
+        speed_sq = np.einsum("ij,ij->i", self.vel, self.vel)
+        return float(0.5 * np.sum(self.mass * speed_sq) / self.n)
 
-    def _record_frame(self, phase: str) -> None:
-        speed = np.hypot(self.vel[:, 0], self.vel[:, 1])
-        platen_y = self.platen.y if self.platen.active else None
-        self.frames.append((self.time, self.pos.copy(), self.radius.copy(),
-                            speed, platen_y, phase))
+    def bed_top(self) -> float:
+        """Highest point of any particle [m]."""
+        if self.n == 0:
+            return self.geometry.bounding_box[1]
+        return float(np.max(self.pos[:, 1] + self.radius))
 
-    def _record_load(self) -> None:
-        self.load_curve.append((self.time_load,
-                                self.load_fn(self.time_load),
-                                self.platen.displacement,
-                                self.platen.fy))
+    def __record_frame(self, phase: str) -> None:
+        """Store a snapshot of the current state.
+
+        Args:
+            phase: name of the current stage.
+        """
+        speeds = np.hypot(self.vel[:, 0], self.vel[:, 1])
+        platens = tuple(np.array([p.start, p.end]) for p in self.platens)
+        self.frames.append(Frame(self.time, self.pos.copy(), self.radius.copy(), speeds, platens, phase))
+
+    def __record_loads(self) -> None:
+        """Append the current state of every platen to its load curve."""
+        for platen, curve in zip(self.platens, self.load_curves):
+            curve.time.append(self.load_time)
+            curve.applied.append(platen.spec.load(self.load_time))
+            curve.displacement.append(platen.displacement)
+            curve.reaction.append(platen.reaction)
 
     # ------------------------------------------------------------------ #
-    #  High level driver                                                 #
+    #  High level drivers                                                #
     # ------------------------------------------------------------------ #
-    def deposit(self, max_steps: int, min_steps: int = 500,
-                record_every: int = 40) -> None:
-        """Rain the particles down until the packing is quiet (or step cap)."""
-        self.compute_forces()
+    def deposit(self, max_steps: int, min_steps: int = 500, record_every: int = 40) -> None:
+        """Let the initial particles fall until the packing is at rest, or until the step limit.
+
+        Args:
+            max_steps: largest number of time steps.
+            min_steps: number of time steps before the packing may be declared at rest.
+            record_every: number of time steps between two recorded frames.
+
+        Raises:
+            ValueError: if record_every is not positive.
+        """
+        _check_record_every(record_every)
         for s in range(max_steps):
             self.step()
             if s % record_every == 0:
-                self._record_frame("deposition")
-            if s >= min_steps and self.mean_kinetic_energy() < self.quiet_tol:
+                self.__record_frame("deposition")
+            if s >= min_steps and self.mean_kinetic_energy() < self.settings.quiet_tolerance:
                 break
 
-    def bed_top(self) -> float:
-        if self.n == 0:
-            return 0.0
-        return float(np.max(self.pos[:, 1] + self.radius))
+    def rain_until_full(self, settings: Optional[RainSettings] = None) -> int:
+        """Rain particles into the domain in waves until it is full, then let the packing settle.
 
-    def rest(self, duration: float, record_every: int = 60) -> None:
-        """Pause after deposition: let the packing settle for ``duration`` s.
+        Each wave inserts up to ``batch_size`` particles in a band near the top of the domain. A radius that cannot
+        be placed is retried in the next waves, largest first, so the size distribution is not biased towards small
+        particles. Once the packing reaches the band nothing can be inserted, and after ``patience`` empty waves in
+        a row the domain is considered full.
 
-        No load is applied during this interval; the simulation simply advances
-        in time under gravity so the bed can relax before the platen is engaged.
+        Args:
+            settings: deposition settings; defaults to ``RainSettings()``.
+
+        Returns:
+            The number of particles in the domain.
         """
-        steps = int(round(duration / self.dt))
-        self.compute_forces()
-        for s in range(steps):
-            self.step()
-            if s % record_every == 0:
-                self._record_frame("settling")
-
-    def compress(self, steps: int, record_every: int = 40) -> None:
-        """Apply the time-dependent load through the platen."""
-        self.platen.place(self.bed_top())
-        self.compute_forces()
-        for s in range(steps):
-            self.step()
-            if s % record_every == 0:
-                self._record_frame("loading")
-                self._record_load()
-
-    def rain_until_full(self, batch_size: int = 15, steps_between: int = 450,
-                        patience: int = 4, settle_steps: int = 4000,
-                        settle_min: int = 500, max_particles: int = 2000,
-                        max_steps: int = 300000, record_every: int = 60,
-                        seed: int = 0) -> int:
-        """Rain particles in waves until the box is full, then let it settle.
-
-        Each wave drops up to ``batch_size`` particles in a band near the top
-        of the box.  Once the growing packing reaches that band no more
-        particles can be inserted; after ``patience`` consecutive empty waves
-        the box is considered full and a final settling stage brings it to
-        rest.  Returns the final number of particles.
-        """
-        rng = np.random.default_rng(seed)
-        self.compute_forces()
-        total = 0
+        rain = settings or RainSettings()
+        rng = np.random.default_rng(rain.seed)
+        r_min, r_max = self.radius_range
+        band = rain.insertion_band or (self.geometry.bounding_box[3] - 2.0 * r_max,
+                                       self.geometry.bounding_box[3] - r_max)
+        pending: List[float] = []
         empty_waves = 0
-        while empty_waves < patience and self.n < max_particles and total < max_steps:
-            n_new = self._append_particles(self._insert_rain_batch(batch_size, rng))
-            empty_waves = 0 if n_new else empty_waves + 1
-            self.compute_forces()
-            for _ in range(steps_between):
+        steps = 0
+        while empty_waves < rain.patience and self.n < rain.max_particles and steps < rain.max_steps:
+            room = min(rain.batch_size, rain.max_particles - self.n)
+            # only top the queue up, so radii that could not be placed are retried instead of replaced
+            pending.extend(float(r) for r in rng.uniform(r_min, r_max, max(0, room - len(pending))))
+            positions, radii, unplaced = self.__place_wave(pending[:room], band, rain.attempts, rng)
+            pending = unplaced + pending[room:]
+            velocities = np.zeros_like(positions)
+            velocities[:, 1] = -rain.rain_speed
+            self.__append_particles(positions, radii, velocities)
+            empty_waves = 0 if radii.size else empty_waves + 1
+            for _ in range(rain.steps_between):
                 self.step()
-                total += 1
-                if total % record_every == 0:
-                    self._record_frame("deposition")
+                steps += 1
+                if steps % rain.record_every == 0:
+                    self.__record_frame("deposition")
 
-        # final settling until the packing is quiet
-        for s in range(settle_steps):
+        for s in range(rain.settle_steps):
             self.step()
-            total += 1
-            if total % record_every == 0:
-                self._record_frame("deposition")
-            if s >= settle_min and self.mean_kinetic_energy() < self.quiet_tol:
+            steps += 1
+            if steps % rain.record_every == 0:
+                self.__record_frame("deposition")
+            if s >= rain.settle_min_steps and self.mean_kinetic_energy() < self.settings.quiet_tolerance:
                 break
         return self.n
 
+    def __place_wave(self, radii: Sequence[float], band: Tuple[float, float], attempts: int,
+                     rng: np.random.Generator) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], List[float]]:
+        """Find non-overlapping positions in the insertion band for a wave of particles.
+
+        Args:
+            radii: radii to place [m].
+            band: lowest and highest y of the particle centres [m].
+            attempts: random positions tried per particle.
+            rng: random generator.
+
+        Returns:
+            The centres and radii of the placed particles, and the radii that could not be placed.
+        """
+        y_low, y_high = band
+        x_min, _, x_max, _ = self.geometry.bounding_box
+        r_max = self.radius_range[1]
+        # only particles whose centre is this close to the band can overlap a new particle
+        nearby = self.pos[:, 1] > y_low - 2.0 * r_max
+        others = self.pos[nearby]
+        other_radii = self.radius[nearby]
+        starts, ends, _ = self.__segment_state()
+        moved = self.__platen_segments
+
+        placed: List[Tuple[float, float, float]] = []
+        unplaced: List[float] = []
+        for radius in sorted(radii, reverse=True):
+            if x_max - x_min <= 2.0 * radius:
+                unplaced.append(radius)
+                continue
+            xs = rng.uniform(x_min + radius, x_max - radius, attempts)
+            ys = rng.uniform(y_low, y_high, attempts)
+            candidates = np.column_stack((xs, ys))
+            fits = self.geometry.contains(candidates)
+            fits &= self.geometry.distance_to_edges(candidates).min(axis=1) >= radius
+            if moved.size:
+                _, offset = project_onto_segments(candidates, starts[moved], ends[moved])
+                fits &= np.hypot(offset[..., 0], offset[..., 1]).min(axis=1) >= radius
+            if others.shape[0]:
+                delta = candidates[:, None, :] - others[None, :, :]
+                fits &= ~np.any(np.einsum("ijk,ijk->ij", delta, delta) < (other_radii + radius)**2, axis=1)
+            found = np.flatnonzero(fits)
+            if found.size == 0:
+                unplaced.append(radius)
+                continue
+            x, y = candidates[found[0]]
+            placed.append((float(x), float(y), radius))
+            others = np.vstack((others, [[x, y]]))
+            other_radii = np.append(other_radii, radius)
+
+        table = np.array(placed, dtype=np.float64).reshape(-1, 3)
+        return table[:, :2].copy(), table[:, 2].copy(), unplaced
+
+    def rest(self, duration: float, record_every: int = 60) -> None:
+        """Let the packing relax for a given time without changing the load.
+
+        Args:
+            duration: time to simulate [s].
+            record_every: number of time steps between two recorded frames.
+
+        Raises:
+            ValueError: if the duration is negative.
+            ValueError: if record_every is not positive.
+        """
+        steps = self.__steps_for(duration)
+        _check_record_every(record_every)
+        for s in range(steps):
+            self.step()
+            if s % record_every == 0:
+                self.__record_frame("settling")
+
+    def compress(self, duration: float, record_every: int = 40) -> None:
+        """Apply the loads of the loaded platens for a given time.
+
+        On the first call every platen is seated on the packing (if its ``seat_on_bed`` is set) and released, and
+        the load clock starts from zero. Later calls continue the same load history.
+
+        Args:
+            duration: time to simulate [s].
+            record_every: number of time steps between two recorded frames and load curve points.
+
+        Raises:
+            ValueError: if the geometry has no loaded platen.
+            ValueError: if the duration is negative.
+            ValueError: if record_every is not positive.
+        """
+        if not self.platens:
+            raise ValueError("The geometry has no LoadedPlaten edge to apply a load with.")
+        steps = self.__steps_for(duration)
+        _check_record_every(record_every)
+        if not any(p.active for p in self.platens):
+            for platen in self.platens:
+                if platen.spec.seat_on_bed and self.n:
+                    platen.seat(self.pos, self.radius)
+                platen.activate()
+            self.__forces_valid = False
+            self.compute_forces()
+            self.__record_loads()
+        for s in range(steps):
+            self.step()
+            if s % record_every == 0:
+                self.__record_frame("loading")
+                self.__record_loads()
+
+    def __steps_for(self, duration: float) -> int:
+        """Convert a duration into a number of time steps.
+
+        Args:
+            duration: time to simulate [s].
+
+        Returns:
+            The number of time steps.
+
+        Raises:
+            ValueError: if the duration is negative.
+        """
+        if duration < 0.0:
+            raise ValueError(f"duration must be non-negative, got {duration}.")
+        return int(round(duration / self.dt))
+
+
+def _check_record_every(record_every: int) -> None:
+    """Check a recording interval.
+
+    Args:
+        record_every: number of time steps between two recorded frames.
+
+    Raises:
+        ValueError: if record_every is not positive.
+    """
+    if record_every < 1:
+        raise ValueError(f"record_every must be at least 1, got {record_every}.")

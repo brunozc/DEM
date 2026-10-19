@@ -1,155 +1,193 @@
 """Hertz-Mindlin (no-slip) contact model for the DEMcookies 2D DEM.
 
-The model follows the classic non-linear formulation used in most DEM codes
-(e.g. LIGGGHTS / EDEM):
+The model follows the classic non-linear formulation used in most DEM codes (e.g. LIGGGHTS / EDEM):
 
-* Normal force    : F_n = 4/3 E* sqrt(R*) delta_n^(3/2)   (Hertz)
-* Tangential force : F_t = -S_t * xi_t                     (Mindlin spring)
-* Viscous damping  : proportional to the contact stiffness and the
-  coefficient of restitution.
-* Coulomb limit    : |F_t| <= mu * F_n  (sliding friction).
+* normal force: F_n = 4/3 E* sqrt(R*) delta_n^(3/2) (Hertz);
+* tangential force: F_t = -S_t xi_t (Mindlin spring);
+* viscous damping proportional to the contact stiffness and set by the coefficient of restitution;
+* Coulomb limit: |F_t| <= mu F_n (sliding friction).
 
-All particles (and the walls/platen) are assumed to share the same material,
-so the effective contact constants ``E*``, ``G*``, ``beta`` and ``mu`` are
-constant and pre-computed once.  Only the effective radius ``R*`` and the
-effective mass ``m*`` change from contact to contact and are supplied by the
-solver.
+All particles and boundaries share one material, so the effective moduli ``E*`` and ``G*`` and the damping factor
+``beta`` are computed once. The effective radius ``R*``, the effective mass ``m*`` and the friction coefficient may
+differ from contact to contact and are supplied by the solver. Contacts are evaluated in batches.
 """
-
-from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Optional, Union
 
-# 2 * sqrt(5/6) -- the constant that appears in the Tsuji/Hertz damping term.
-_DAMP_CONST = 2.0 * math.sqrt(5.0 / 6.0)
+import numpy as np
+import numpy.typing as npt
+
+from .globals import DAMPING_CONSTANT, MIN_RESTITUTION, RAYLEIGH_OFFSET, RAYLEIGH_POISSON_COEFFICIENT
 
 
 @dataclass(frozen=True)
 class MaterialProperties:
-    """Bulk material properties shared by every particle and boundary."""
+    """Bulk material properties shared by every particle and boundary.
 
-    density: float          # kg / m^3
-    youngs_modulus: float   # Pa
-    poisson_ratio: float    # -
-    restitution: float      # - coefficient of restitution in [0, 1]
-    friction: float         # - Coulomb friction coefficient
+    Attributes:
+        density: mass density [kg/m^3].
+        youngs_modulus: Young's modulus [Pa].
+        poisson_ratio: Poisson ratio.
+        restitution: coefficient of restitution, in [0, 1].
+        friction: Coulomb friction coefficient.
+    """
+
+    density: float
+    youngs_modulus: float
+    poisson_ratio: float
+    restitution: float
+    friction: float
+
+    def __post_init__(self) -> None:
+        """Validate the material.
+
+        Raises:
+            ValueError: if the density is not positive.
+            ValueError: if Young's modulus is not positive.
+            ValueError: if the Poisson ratio is not in (-1, 0.5).
+            ValueError: if the restitution is not in [0, 1].
+            ValueError: if the friction coefficient is negative.
+        """
+        if self.density <= 0.0:
+            raise ValueError(f"density must be positive, got {self.density}.")
+        if self.youngs_modulus <= 0.0:
+            raise ValueError(f"youngs_modulus must be positive, got {self.youngs_modulus}.")
+        if not -1.0 < self.poisson_ratio < 0.5:
+            raise ValueError(f"poisson_ratio must be in (-1, 0.5), got {self.poisson_ratio}.")
+        if not 0.0 <= self.restitution <= 1.0:
+            raise ValueError(f"restitution must be in [0, 1], got {self.restitution}.")
+        if self.friction < 0.0:
+            raise ValueError(f"friction must be non-negative, got {self.friction}.")
 
     @property
     def shear_modulus(self) -> float:
-        """Shear modulus G = E / (2 (1 + nu))."""
+        """Shear modulus G = E / (2 (1 + nu)) [Pa]."""
         return self.youngs_modulus / (2.0 * (1.0 + self.poisson_ratio))
 
 
-def rayleigh_time_step(material: MaterialProperties, min_radius: float,
-                       safety: float = 0.2) -> float:
+def rayleigh_time_step(material: MaterialProperties, min_radius: float, safety: float = 0.2) -> float:
     """Return a stable integration time step.
 
-    Uses a fraction (``safety``) of the Rayleigh critical time step, which is
-    the time a shear wave needs to travel across the smallest particle.
+    Uses a fraction of the Rayleigh critical time step, the time a surface wave needs to cross the smallest particle.
+
+    Args:
+        material: particle material.
+        min_radius: radius of the smallest particle [m].
+        safety: fraction of the Rayleigh time step to use.
+
+    Returns:
+        The time step [s].
+
+    Raises:
+        ValueError: if the radius is not positive.
+        ValueError: if the safety factor is not positive.
     """
-    g = material.shear_modulus
-    rho = material.density
-    nu = material.poisson_ratio
-    t_rayleigh = math.pi * min_radius * math.sqrt(rho / g) / (0.1631 * nu + 0.8766)
+    if min_radius <= 0.0:
+        raise ValueError(f"min_radius must be positive, got {min_radius}.")
+    if safety <= 0.0:
+        raise ValueError(f"safety must be positive, got {safety}.")
+    wave_speed_ratio = RAYLEIGH_POISSON_COEFFICIENT * material.poisson_ratio + RAYLEIGH_OFFSET
+    t_rayleigh = math.pi * min_radius * math.sqrt(material.density / material.shear_modulus) / wave_speed_ratio
     return safety * t_rayleigh
+
+
+@dataclass(frozen=True, eq=False)
+class ContactForces:
+    """Result of evaluating a batch of contacts.
+
+    Attributes:
+        force: total contact force on body i, shape (k, 2) [N].
+        tangential_force: tangential part of the force, used for the torque, shape (k, 2) [N].
+        tangential_spring: updated tangential displacement of each contact, shape (k, 2) [m].
+    """
+
+    force: npt.NDArray[np.float64]
+    tangential_force: npt.NDArray[np.float64]
+    tangential_spring: npt.NDArray[np.float64]
 
 
 class HertzMindlinModel:
     """Stateless evaluator of the Hertz-Mindlin contact force.
 
-    The tangential displacement history (``xi``) lives in the solver; this
-    class only turns the current kinematic state of a single contact into a
-    force and an updated tangential spring.
+    The tangential displacement history lives in the solver; this class turns the kinematic state of a batch of
+    contacts into forces and updated tangential springs.
     """
 
-    def __init__(self, material: MaterialProperties):
+    def __init__(self, material: MaterialProperties) -> None:
+        """Pre-compute the material constants of the contact law.
+
+        Args:
+            material: material shared by the particles and boundaries.
+        """
         e = material.youngs_modulus
         nu = material.poisson_ratio
         g = material.shear_modulus
 
-        # Effective moduli for two identical bodies in contact.
+        # effective moduli of two identical bodies in contact
         self.e_star = e / (2.0 * (1.0 - nu * nu))
         self.g_star = g / (2.0 * (2.0 - nu))
 
-        # Damping ratio from the coefficient of restitution.
-        restitution = min(max(material.restitution, 1e-4), 1.0)
+        restitution = min(max(material.restitution, MIN_RESTITUTION), 1.0)
         ln_e = math.log(restitution)
         self.beta = abs(ln_e / math.sqrt(ln_e * ln_e + math.pi * math.pi))
+        self.friction = material.friction
 
-        self.mu = material.friction
+    def evaluate(self,
+                 normal: npt.NDArray[np.float64],
+                 overlap: npt.NDArray[np.float64],
+                 relative_velocity: npt.NDArray[np.float64],
+                 tangential_spring: npt.NDArray[np.float64],
+                 time_step: float,
+                 effective_radius: npt.NDArray[np.float64],
+                 effective_mass: npt.NDArray[np.float64],
+                 friction: Optional[Union[float, npt.NDArray[np.float64]]] = None) -> ContactForces:
+        """Evaluate a batch of k contacts between bodies i and j.
 
-    def contact_force(self, nx: float, ny: float, delta: float,
-                      vrx: float, vry: float, xi_x: float, xi_y: float,
-                      dt: float, r_eff: float, m_eff: float):
-        """Evaluate one contact.
+        Args:
+            normal: unit normals pointing from body j towards body i, shape (k, 2).
+            overlap: normal overlaps, positive in contact, shape (k,) [m].
+            relative_velocity: velocity of the contact point of i relative to j, shape (k, 2) [m/s].
+            tangential_spring: stored tangential displacements, shape (k, 2) [m].
+            time_step: increment over which the relative velocity is accumulated into the spring; zero re-evaluates
+                the forces of the current state without advancing the history [s].
+            effective_radius: effective radii R*, shape (k,) [m].
+            effective_mass: effective masses m*, shape (k,) [kg].
+            friction: Coulomb friction coefficient per contact or for all contacts; None uses the material's.
 
-        Parameters
-        ----------
-        nx, ny:
-            Unit normal pointing from body *j* towards body *i* (the direction
-            in which body *i* is pushed away).
-        delta:
-            Normal overlap (positive in contact).
-        vrx, vry:
-            Relative surface velocity of *i* with respect to *j*.
-        xi_x, xi_y:
-            Stored tangential displacement of the contact.
-        dt:
-            Time step.
-        r_eff, m_eff:
-            Effective radius and mass of the contact.
-
-        Returns
-        -------
-        (fx, fy, ftx, fty, xi_x, xi_y)
-            Total force on *i*, its tangential part (for the torque) and the
-            updated tangential displacement.
+        Returns:
+            The contact forces on body i and the updated tangential springs. Contacts with a non-positive overlap
+            get zero force and a reset spring.
         """
-        if delta <= 0.0:
-            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        mu = self.friction if friction is None else friction
+        in_contact = overlap > 0.0
+        overlap = np.where(in_contact, overlap, 0.0)
 
-        sqrt_rd = math.sqrt(r_eff * delta)
-        s_n = 2.0 * self.e_star * sqrt_rd            # normal stiffness
-        s_t = 8.0 * self.g_star * sqrt_rd            # tangential stiffness
-        k_n = (4.0 / 3.0) * self.e_star * math.sqrt(r_eff)
+        contact_radius = np.sqrt(effective_radius * overlap)
+        s_n = 2.0 * self.e_star * contact_radius
+        s_t = 8.0 * self.g_star * contact_radius
+        damping = DAMPING_CONSTANT * self.beta
 
-        # --- normal force ---------------------------------------------------
-        v_n = vrx * nx + vry * ny                    # < 0 while approaching
-        c_n = _DAMP_CONST * self.beta * math.sqrt(s_n * m_eff)
-        f_n = k_n * delta ** 1.5 - c_n * v_n
-        if f_n < 0.0:                                # no cohesion
-            f_n = 0.0
+        # normal force: Hertz spring (2/3 S_n delta = 4/3 E* sqrt(R*) delta^1.5) plus dashpot, never cohesive
+        v_n = np.einsum("ij,ij->i", relative_velocity, normal)
+        f_n = np.maximum((2.0 / 3.0) * s_n * overlap - damping * np.sqrt(s_n * effective_mass) * v_n, 0.0)
 
-        # --- tangential force (Mindlin spring + damping) --------------------
-        v_tx = vrx - v_n * nx
-        v_ty = vry - v_n * ny
+        # tangential spring: rotate it into the current tangent plane, then add this step's sliding
+        v_t = relative_velocity - v_n[:, None] * normal
+        spring = tangential_spring - np.einsum("ij,ij->i", tangential_spring, normal)[:, None] * normal
+        spring = spring + v_t * time_step
 
-        # keep the stored spring in the (rotated) tangent plane
-        xi_dot_n = xi_x * nx + xi_y * ny
-        xi_x -= xi_dot_n * nx
-        xi_y -= xi_dot_n * ny
-        # accumulate the incremental tangential displacement
-        xi_x += v_tx * dt
-        xi_y += v_ty * dt
+        f_t = -s_t[:, None] * spring - (damping * np.sqrt(s_t * effective_mass))[:, None] * v_t
+        f_t_magnitude = np.hypot(f_t[:, 0], f_t[:, 1])
+        f_t_limit = mu * f_n
+        sliding = f_t_magnitude > f_t_limit
+        if np.any(sliding):
+            # project onto the friction cone and reset the spring so it stays consistent with the capped force
+            limit = np.broadcast_to(f_t_limit, f_t_magnitude.shape)[sliding]
+            f_t[sliding] *= (limit / f_t_magnitude[sliding])[:, None]
+            spring[sliding] = -f_t[sliding] / s_t[sliding][:, None]
 
-        c_t = _DAMP_CONST * self.beta * math.sqrt(s_t * m_eff)
-        ftx = -s_t * xi_x - c_t * v_tx
-        fty = -s_t * xi_y - c_t * v_ty
-
-        # Coulomb sliding limit
-        ft_mag = math.hypot(ftx, fty)
-        ft_max = self.mu * f_n
-        if ft_mag > ft_max:
-            if ft_mag > 0.0:
-                scale = ft_max / ft_mag
-                ftx *= scale
-                fty *= scale
-            if s_t > 0.0:
-                # rescale the spring so it is consistent with the capped force
-                xi_x = -ftx / s_t
-                xi_y = -fty / s_t
-
-        fx = f_n * nx + ftx
-        fy = f_n * ny + fty
-        return fx, fy, ftx, fty, xi_x, xi_y
+        spring[~in_contact] = 0.0
+        force = f_n[:, None] * normal + f_t
+        return ContactForces(force=force, tangential_force=f_t, tangential_spring=spring)

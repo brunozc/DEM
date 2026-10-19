@@ -26,19 +26,24 @@ the remainder of the chapter.
         $v_{p}\!\leftarrow\!v_{p}+\tfrac{\Delta t}{2}a_{p}\bigl(t^{n}\bigr)$
   \item \emph{Drift}\\
         $\mathbf{x}_{i}\!\leftarrow\!\mathbf{x}_{i}+\Delta t\,\mathbf{v}_{i}$,\quad
-        $y_{p}\!\leftarrow\!y_{p}+\Delta t\,v_{p}$,\quad
-        $t\!\leftarrow\!t+\Delta t$
-  \item \emph{Force evaluation} (\texttt{compute\_forces})
+        $s_{p}\!\leftarrow\!s_{p}+\Delta t\,v_{p}$,\quad
+        $t\!\leftarrow\!t+\Delta t$;\quad
+        every 50 steps, remove the particles that left through an open edge
+        (Section~\ref{sec:coupling})
+  \item \emph{Force evaluation}
     \begin{enumerate}[leftmargin=1.6em,nosep,label=(\alph*)]
       \item reset $\mathbf{F}_{i}$, $T_{i}$; add gravity $-m_{i}g\,\mathbf{e}_{y}$;
-      \item rebuild the cell list and generate candidate pairs
-            (Section~\ref{sec:broadphase});
-      \item for each candidate pair: exact overlap test~\eqref{eq:overlap},
-            contact law of Section~\ref{sec:contact-summary}, assembly of
+      \item rebuild the neighbour list if a particle has moved more than half
+            the skin since the last build (Section~\ref{sec:verlet});
+      \item for all candidate pairs at once: exact overlap
+            test~\eqref{eq:overlap}, contact law of
+            Section~\ref{sec:contact-summary}, assembly of
             $\pm\mathbf{F}_{ij}$ and $T_{ij},T_{ji}$;
-      \item for each particle: three wall contacts and, if active, the platen
-            contact; accumulate the platen reaction~\eqref{eq:platen-reaction};
-      \item replace the tangential-history table by the one just built
+      \item for all particles and all solid edges at once: closest
+            point~\eqref{eq:closest-point}, removal of duplicate vertex
+            contacts, contact law, and accumulation of the platen
+            reactions~\eqref{eq:platen-reaction};
+      \item store the updated tangential springs in place
             (Section~\ref{sec:history}).
     \end{enumerate}
   \item \emph{Second half kick} (uses the new forces and $F(t^{n+1})$)\\
@@ -52,13 +57,14 @@ the remainder of the chapter.
 
 Three drivers chain these steps into the physical stages of the experiment:
 \texttt{rain\_until\_full} (deposition, Section~\ref{sec:deposition}),
-\texttt{rest} (relaxation) and \texttt{compress} (loading).
+\texttt{rest} (relaxation) and \texttt{compress} (loading).  Every per-contact
+operation of steps 3(c) and 3(d) is a NumPy array operation over all contacts
+at once; no Python loop runs over particles or contacts.
 
 \section{State representation}
 \label{sec:state}
 
-All particle data are held in contiguous \texttt{NumPy} arrays that grow as
-particles are inserted:
+All particle data are held in contiguous \texttt{NumPy} arrays:
 
 \begin{center}
 \begin{tabular}{lll}
@@ -69,18 +75,23 @@ particles are inserted:
   \texttt{omega}, \texttt{torque}            & $(N,)$  & $\omega_{i}$, $T_{i}$ \\
   \texttt{radius}, \texttt{mass}, \texttt{inertia} & $(N,)$ & $R_{i}$, $m_{i}$, $I_{i}$ \\
   \texttt{inv\_mass}, \texttt{inv\_inertia}  & $(N,)$  & $1/m_{i}$, $1/I_{i}$ \\
-  \texttt{tangential}                        & dict    & $\boldsymbol{\xi}$ per contact \\
+  neighbour list \texttt{first}, \texttt{second} & $(P,)$ & candidate pairs $(i,j)$, $i<j$ \\
+  neighbour list \texttt{spring}             & $(P,2)$ & $\boldsymbol{\xi}$ of each candidate pair \\
+  wall springs                               & $(N,S,2)$ & $\boldsymbol{\xi}$ of each particle--edge pair \\
   \bottomrule
 \end{tabular}
 \end{center}
+Here $P$ is the length of the neighbour list and $S$ the number of solid edges.
 
 Two implementation details matter.  First, the reciprocals $1/m_{i}$ and
 $1/I_{i}$ are cached because they are used twice per step, in the two half
 kicks.  Second, new particles are always \emph{appended} at the end of the
-arrays, never inserted; existing indices are therefore stable, which is what
-makes the index-keyed history table of Section~\ref{sec:history} valid across
-insertions.  Whenever the radius array changes, $m_{i}$, $I_{i}$ and their
-reciprocals are recomputed from~\eqref{eq:massprops}.
+arrays, so existing indices, and with them the pair keys of
+Section~\ref{sec:history}, stay valid across insertions.  Particles that leave
+through an open edge are removed and the others renumbered; the renumbering
+preserves their order, so the tangential history is carried over.  Whenever the
+radius array changes, $m_{i}$, $I_{i}$ and their reciprocals are recomputed
+from~\eqref{eq:massprops}.
 
 \section{Time integration}
 \label{sec:integration}
@@ -106,7 +117,7 @@ form:
 \end{align}
 The rotational degrees of freedom and the platen degree of freedom are advanced
 by the same three-stage pattern, with $T_{i}/I_{i}$ and
-$a_{p}=\bigl(F_{p}-F(t)-m_{p}g_{p}\bigr)/m_{p}$ in place of $\mathbf{F}/m$.
+$a_{p}=\bigl(F(t)-F_{p}+\chi\,m_{p}\,\mathbf{g}\cdot\mathbf{n}_{p}\bigr)/m_{p}$ in place of $\mathbf{F}/m$.
 
 The scheme is explicit, requires a single force evaluation per step, stores no
 history beyond the current state, is time reversible, and is second-order
@@ -208,26 +219,30 @@ A naive search over all $\tfrac{1}{2}N(N-1)$ pairs costs $O(N^{2})$ per step and
 is unaffordable.  Instead the domain is covered by a uniform grid of square
 cells of side
 \begin{equation}
-  h = 2R_{\max},
+  h = 2R_{\max} + s,
   \label{eq:cellsize}
 \end{equation}
-and every particle is binned into the cell
+where $s$ is the skin distance of the neighbour list
+(Section~\ref{sec:verlet}), and every particle is binned into the cell
 \begin{equation}
-  c(\mathbf{x}_{i}) = \bigl(\lfloor x_{i}/h\rfloor,\;
-                            \lfloor y_{i}/h\rfloor\bigr) \in \mathbb{Z}^{2}.
+  c(\mathbf{x}_{i}) = \bigl(\lfloor (x_{i}-x_{\min})/h\rfloor,\;
+                            \lfloor (y_{i}-y_{\min})/h\rfloor\bigr)
+                    \in \mathbb{Z}^{2},
   \label{eq:cellindex}
 \end{equation}
-Only occupied cells are stored, in a hash map from the index pair to the list of
-particles it contains, so the memory cost is $O(N)$ regardless of how empty the
-box is -- an important property during deposition, when the bed occupies a small
-and growing fraction of the domain.
+counted from the lower left corner of the particle cloud.  The cells are
+numbered linearly and the particles sorted by cell number, so the members of any
+cell are found by a binary search in the sorted array.  Only occupied cells take
+memory, so the cost is $O(N)$ regardless of how empty the domain is -- an
+important property during deposition, when the bed occupies a small and growing
+fraction of the domain.
 
 \paragraph{Correctness.}  The choice~\eqref{eq:cellsize} guarantees that no
-contact is missed.  If $i$ and $j$ touch then
-$d_{ij}<R_{i}+R_{j}\le 2R_{\max}=h$, hence
-$\lvert x_{i}-x_{j}\rvert<h$ and $\lvert y_{i}-y_{j}\rvert<h$, so their cell
-indices differ by at most one in each direction.  Searching a particle's own
-cell and its eight neighbours is therefore exhaustive.
+candidate pair is missed.  If the surfaces of $i$ and $j$ are less than $s$
+apart then $d_{ij}<R_{i}+R_{j}+s\le h$, hence $\lvert x_{i}-x_{j}\rvert<h$ and
+$\lvert y_{i}-y_{j}\rvert<h$, so their cell indices differ by at most one in
+each direction.  Searching a particle's own cell and its eight neighbours is
+therefore exhaustive.
 
 \paragraph{Half stencil.}  To visit every unordered pair exactly once, the
 search combines the pairs inside each cell with the pairs between the cell and
@@ -239,12 +254,34 @@ only \emph{half} of its neighbours,
 the remaining four offsets being the negatives of these and therefore already
 covered when the neighbouring cell is processed.  This halves the number of
 candidate pairs and, more importantly, removes the risk of applying a contact
-force twice.
+force twice.  For each offset the candidates of all particles are generated in
+one vectorised operation, by repeating every particle index as many times as the
+target cell has members.
 
-\paragraph{Narrow phase.}  Each candidate pair is then subjected to the exact
-test~\eqref{eq:overlap}; non-overlapping candidates are discarded before any
-constitutive evaluation.  The pair is canonically ordered as $(i,j)$ with $i<j$
-so that the history key of Section~\ref{sec:history} is unique.
+\paragraph{Distance filter.}  The candidates are ordered as $(i,j)$ with $i<j$,
+only those with $d_{ij}<R_{i}+R_{j}+s$ are kept, and the result is sorted by $i$
+and then by $j$.
+
+\subsection{Verlet neighbour list}
+\label{sec:verlet}
+
+The candidate pairs are kept as a \emph{neighbour list} and reused over many
+steps.  If no particle has moved by more than $s/2$ since the list was built, no
+two particles can have approached each other by more than $s$, so every pair now
+in contact was within the skin at build time and is in the list.  The list is
+therefore rebuilt only when
+\begin{equation}
+  \max_{i}\,\lVert\mathbf{x}_{i}-\mathbf{x}_{i}^{\text{build}}\rVert
+  > \tfrac{1}{2}s ,
+  \label{eq:rebuild}
+\end{equation}
+or when particles have been added or removed.  The criterion is exact, so the
+list never loses a contact.  At every step only the narrow phase, the exact
+test~\eqref{eq:overlap}, runs over the list, and non-overlapping candidates are
+discarded before any constitutive evaluation.  The skin is set as a fraction of
+$R_{\min}$ (\texttt{GlobalSettings.neighbour\_skin}, default $0.5$): a larger
+skin rebuilds less often but tests more pairs per step.  During quasi-static
+loading the particles barely move and the list is hardly ever rebuilt.
 
 \subsection{Cost and the effect of polydispersity}
 
@@ -256,88 +293,92 @@ per cell is
   n_{\text{cell}}^{\max} \sim
   \left(\frac{R_{\max}}{R_{\min}}\right)^{2},
 \end{equation}
-so the number of candidate pairs per particle grows quadratically with the size
-ratio.  For the reference case $R_{\max}/R_{\min}=5$, which is already a
-noticeable penalty: a hierarchical grid or per-size-class cell lists would be
-the natural remedy for broader distributions.  The overall cost of one step is
-nevertheless
+so the number of pairs examined while building the list grows quadratically
+with the size ratio; the distance filter then reduces them to the pairs within
+the skin.  The cost of one step is
 \begin{equation}
-  \mathcal{O}\bigl(N\bigr)\ \text{(binning)}
-  + \mathcal{O}\bigl(N\,\bar{n}_{\text{pairs}}\bigr)\ \text{(narrow phase)},
+  \mathcal{O}\bigl(N\log N\bigr)\ \text{(sorting, at rebuilds only)}
+  + \mathcal{O}\bigl(P\bigr)\ \text{(narrow phase)}
+  + \mathcal{O}\bigl(N S\bigr)\ \text{(solid edges)},
 \end{equation}
-i.e.\ linear in $N$ with a size-ratio-dependent constant.  The grid is rebuilt
-from scratch at every step; no Verlet neighbour list with a skin distance is
-used, which keeps the implementation simple and free of the "lost contact"
-errors that an out-of-date neighbour list can produce.
+i.e.\ essentially linear in $N$.  Compared with a loop over the pairs in Python,
+the vectorised evaluation is about an order of magnitude faster for a few
+hundred particles, and the gain grows with $N$.
 
 \section{Tangential-history bookkeeping}
 \label{sec:history}
 
 The tangential spring $\boldsymbol{\xi}$ must persist as long as the contact
-exists and must disappear with it.  This is achieved with a dictionary keyed by
-a contact identifier:
+exists and must disappear with it.  It is stored next to the pair it belongs to:
 \begin{center}
 \begin{tabular}{ll}
   \toprule
-  Key & Contact \\
+  Storage & Contact \\
   \midrule
-  \texttt{("pp", i, j)} & particle $i$ -- particle $j$, with $i<j$ \\
-  \texttt{("wL", i)}, \texttt{("wR", i)}, \texttt{("wB", i)} & particle $i$ -- left / right / bottom wall \\
-  \texttt{("pl", i)} & particle $i$ -- platen \\
+  \texttt{NeighbourList.spring[k]} & particle pair $k$ of the neighbour list, $(i,j)$ with $i<j$ \\
+  wall springs \texttt{[i, s]} & particle $i$ -- solid edge $s$ (wall or platen) \\
   \bottomrule
 \end{tabular}
 \end{center}
 
-At every force evaluation a \emph{fresh} table is built and the old one is
-consulted through
-$\boldsymbol{\xi}_{\text{old}}=\texttt{old.get(key},\ \mathbf{0})$.  This single
-design decision provides three behaviours for free:
-
+This storage provides the three required behaviours:
 \begin{enumerate}[leftmargin=2.2em]
-  \item \textbf{Creation.}  A contact that closes for the first time finds no
-        entry and starts from $\boldsymbol{\xi}=\mathbf{0}$, as required.
-  \item \textbf{Persistence.}  A contact that survives copies its spring
-        forward, which is projected and incremented
-        by~\eqref{eq:xi-project}--\eqref{eq:xi-accumulate}.
-  \item \textbf{Deletion.}  A contact that opens is simply not re-inserted into
-        the new table; its history is garbage collected, and a later re-closure
-        starts afresh.  No explicit pruning pass is needed, and the memory
-        occupied by the table is always proportional to the number of
-        \emph{active} contacts.
+  \item \textbf{Creation.}  A pair enters the neighbour list with
+        $\boldsymbol{\xi}=\mathbf{0}$, so a contact that closes for the first
+        time starts from zero, as required.
+  \item \textbf{Persistence.}  A contact that survives keeps its spring, which
+        is projected and incremented
+        by~\eqref{eq:xi-project}--\eqref{eq:xi-accumulate}.  When the neighbour
+        list is rebuilt, each pair is identified by the integer key
+        $i\cdot 2^{32}+j$; because both the old and the new list are sorted by
+        key, the springs of the surviving pairs are carried over by a single
+        binary search.
+  \item \textbf{Deletion.}  The spring of a pair that is not in contact is reset
+        to zero at every step, so a later re-closure starts afresh.
 \end{enumerate}
+The keys are index based, which is safe because indices are only appended or
+renumbered in order (Section~\ref{sec:state}).
 
-The keys are index based, which is safe only because indices are never
-permuted (Section~\ref{sec:state}).  The price of the approach is one dictionary
-allocation per step and the cost of hashing every active contact, which is
-significant in Python but not in the overall $O(N)$ picture.
-
-Two consistency requirements follow from~\eqref{eq:xi-accumulate}:
-\texttt{compute\_forces} must be called exactly once per time step, and the
-$\Delta t$ passed to the contact law must be the integration step.  The drivers
-call \texttt{compute\_forces} once before entering their loop to prime
-$\mathbf{F}^{\,0}$ for the first half kick; this initial evaluation contributes
-one extra increment to the springs of the contacts that are already closed, an
-$O(\Delta t)$ perturbation of a quiescent state that is immediately relaxed.
+Two consistency requirements follow from~\eqref{eq:xi-accumulate}: the sliding
+of a time step must be accumulated exactly once, and over the integration step
+$\Delta t$.  Only the force evaluation that follows a drift accumulates.  When
+the forces of an unchanged state are evaluated again -- before the first step,
+after particles were inserted, or when the platens are released -- the
+evaluation uses a zero increment, so the springs are only projected onto the
+current tangent plane.  (The first version of the code accumulated in these
+re-evaluations too, which added a spurious increment
+$\mathbf{v}_{t}\Delta t$ to every closed contact at every wave of the
+deposition.)
 
 \section{Boundary and platen coupling}
 \label{sec:coupling}
 
-Wall contacts are evaluated in a single pass over the particles, using the
-overlaps of Table~\ref{tab:boundaries} and the degenerate effective quantities
-\eqref{eq:wall-effective}.  Because the three fixed walls are tested for every
-particle irrespective of its position, the cost is $O(N)$ with a very small
-constant; the overlap test rejects the interior particles immediately.
+Edge contacts are evaluated for all particles and all solid edges at once,
+using~\eqref{eq:closest-point}--\eqref{eq:edge-overlap} and the degenerate
+effective quantities~\eqref{eq:wall-effective}.  The cost is $O(NS)$ with a very
+small constant; the overlap test rejects the interior particles immediately.
+Duplicate vertex contacts are removed with the rule of
+Section~\ref{sec:walls}: a contact whose closest point is a vertex shared with
+the neighbouring solid edge is dropped when that edge has a closer point of its
+own, and, when both edges report the shared vertex, only the earlier edge keeps
+it.
 
-The platen is integrated with the same velocity-Verlet pattern as the particles,
-in a \emph{staggered} (explicit, one-way at each half step) fashion:
+Particles that leave the domain through an open edge are removed once their
+centre lies outside the polygon at a distance larger than an escape margin
+(\texttt{GlobalSettings.escape\_margin}, default four largest radii).  The
+polygon test, an even--odd crossing count, is run every 50 steps; a particle
+that has left interacts with nothing, so removing it slightly late is harmless.
+
+The platens are integrated with the same velocity-Verlet pattern as the
+particles, in a \emph{staggered} (explicit, one-way at each half step) fashion:
 \begin{itemize}[leftmargin=1.6em]
   \item the first half kick uses the reaction $F_{p}$ computed at the end of the
         previous step and the load $F(t^{n})$;
   \item the drift moves the platen with $v_{p}^{\,n+1/2}$, so the particles see
         the new platen position and the half-step platen velocity
         in~\eqref{eq:vrel-platen};
-  \item the force evaluation accumulates the new reaction
-        $F_{p}^{\,n+1}=-\sum_{i}\mathbf{F}_{ip}\cdot\mathbf{e}_{y}$;
+  \item the force evaluation accumulates the new reaction $F_{p}^{\,n+1}$
+        of~\eqref{eq:platen-reaction};
   \item the second half kick uses $F_{p}^{\,n+1}$ and $F(t^{n+1})$.
 \end{itemize}
 The coupling is therefore fully explicit and adds no stability restriction of
@@ -348,8 +389,10 @@ in~\eqref{eq:cn}.  A practical rule is $m_{p}\gtrsim 10\,m_{\max}$; the
 reference case uses $m_{p}=\qty{0.5}{\kilogram}$ against
 $m_{\max}=\qty{0.084}{\kilogram}$.
 
-The load clock \texttt{time\_load} is advanced only while the platen is active,
-so $F(t)$ in~\eqref{eq:ramp} always starts from zero when compression begins,
+Until the load is applied a platen acts as a fixed wall.  The driver
+\texttt{compress} seats every platen with~\eqref{eq:platen-seat}, releases it
+and starts the load clock \texttt{load\_time}, which is advanced only while the
+platens are active, so $F(t)$ starts from zero when loading begins,
 independently of how long the deposition took.
 
 \section{Initial configuration and deposition}
@@ -360,48 +403,55 @@ provided.
 
 \subsection{Loose lattice generator}
 
-\texttt{generate\_rain\_particles} places $N$ particles on a jittered
-rectangular lattice above the bed.  With a lattice pitch
+\texttt{generate\_lattice\_particles} places $N$ particles on a jittered square
+lattice inside the domain.  The lattice, of pitch
 \begin{equation}
-  s = 2 R_{\max}\,\sigma, \qquad \sigma > 1
+  s_{\ell} = 2 R_{\max}\,\sigma, \qquad \sigma \ge 1
   \quad(\text{default } \sigma = 1.15),
 \end{equation}
-the number of columns that fit between the side walls is
-$n_{\text{col}}=\lfloor (B-2R_{\max})/s \rfloor + 1$, and particle $k$ is
-assigned to column $k \bmod n_{\text{col}}$ and row $\lfloor k/n_{\text{col}}
-\rfloor$.  A uniform random offset of amplitude
+covers the bounding box of the polygon, and only the sites that lie inside the
+polygon with a clearance of at least $R_{\max}+\sqrt{2}\,\Delta_{\text{jitter}}$
+from every edge are used, lowest rows first.  A uniform random offset of
+amplitude
 \begin{equation}
-  \Delta_{\text{jitter}} = \tfrac{1}{2}\,j\,\bigl(s - 2R_{\max}\bigr),
+  \Delta_{\text{jitter}} = \tfrac{1}{2}\,j\,\bigl(s_{\ell} - 2R_{\max}\bigr),
   \qquad 0 \le j \le 1 \quad (\text{default } j = 0.25),
 \end{equation}
-is added to both coordinates.  The bound on the amplitude is chosen so that
-\emph{no} initial overlap can be created, whatever the random draw: the residual
-clearance $s-2R_{\max}$ is never fully consumed.  Breaking the lattice symmetry
-matters, because a perfect lattice collapses into a crystalline packing with
-spurious anisotropy.  Radii are drawn from~\eqref{eq:radii} with an explicit
-seed, so packings are reproducible.
+is added to both coordinates.  The bounds are chosen so that \emph{no} initial
+overlap can be created, between particles or with an edge, whatever the random
+draw: the residual clearance $s_{\ell}-2R_{\max}$ between sites is never fully
+consumed, and the edge clearance allows for a diagonal displacement of
+$\sqrt{2}\,\Delta_{\text{jitter}}$.  Breaking the lattice symmetry matters,
+because a perfect lattice collapses into a crystalline packing with spurious
+anisotropy.  Radii are drawn from~\eqref{eq:radii} with an explicit seed, so
+packings are reproducible.  If fewer sites fit than particles are requested, the
+generator raises an error instead of placing particles outside the domain.
 
 \subsection{Wave-by-wave raining}
 
-The driver actually used for the reference simulation,
-\texttt{rain\_until\_full}, starts from an \emph{empty} box and fills it
-adaptively.
+The driver used for the reference simulation, \texttt{rain\_until\_full},
+starts from an \emph{empty} domain and fills it adaptively.
 
 \begin{center}
 \fbox{\parbox{0.93\textwidth}{\small
 \textbf{Algorithm 2 -- raining until full} (\texttt{rain\_until\_full})
 \begin{enumerate}[leftmargin=2.2em,nosep]
-  \item $w \leftarrow 0$ (counter of consecutive empty waves)
+  \item $w \leftarrow 0$ (counter of consecutive empty waves),
+        $\mathcal{Q}\leftarrow\emptyset$ (queue of radii still to be placed)
   \item \textbf{while} $w < w_{\max}$ \textbf{and} $N < N_{\max}$
         \textbf{and} steps $<$ cap:
     \begin{enumerate}[leftmargin=1.6em,nosep,label=(\alph*)]
-      \item attempt to insert $n_{b}$ particles in the band
-            $y\in[L-2R_{\max},\,L-R_{\max}]$, $x\in[R,\,B-R]$, by rejection
-            sampling: a candidate is accepted only if it overlaps neither an
-            existing particle near the top nor a particle already accepted in
-            this wave; up to $n_{a}$ attempts per particle;
+      \item draw radii from~\eqref{eq:radii} until $\mathcal{Q}$ holds $n_{b}$
+            of them;
+      \item for each radius $R$ in $\mathcal{Q}$, largest first, try $n_{a}$
+            random centres in the insertion band
+            $y\in[y_{\text{lo}},y_{\text{hi}}]$; a candidate is accepted if it
+            lies inside the polygon, at least $R$ from every edge and platen,
+            and overlaps neither an existing particle near the band nor a
+            particle already accepted in this wave;
       \item append the accepted particles with velocity
-            $(0,-v_{\text{rain}})$;
+            $(0,-v_{\text{rain}})$; the radii that could not be placed stay in
+            $\mathcal{Q}$;
       \item $w \leftarrow 0$ if at least one particle was inserted, else
             $w \leftarrow w+1$;
       \item advance $n_{s}$ time steps (Algorithm 1).
@@ -412,20 +462,39 @@ adaptively.
 }}
 \end{center}
 
-The rejection test is restricted to the particles whose centres lie above
-$L-4R_{\max}$, which keeps the insertion cost proportional to the number of
-grains near the surface rather than to $N$.  The small downward seed velocity
-$v_{\text{rain}}$ removes the initial free-fall transient and makes the arrival
-of successive waves more regular.  The termination logic is purely geometric:
-when the growing bed reaches the insertion band, rejection sampling can no
-longer place anything, $w$ reaches $w_{\max}$ and the loop exits.  The number of
-particles is therefore an \emph{output} of the procedure, determined by the box
-geometry and the size distribution, not an input.  Default values are collected
-in Table~\ref{tab:deposition}.
+By default the insertion band lies one largest radius below the top of the
+polygon, $[y_{\max}-2R_{\max},\,y_{\max}-R_{\max}]$; it can be set explicitly,
+for instance to leave freeboard below an open top, or when the top of the
+polygon is a narrow apex.  The rejection test is restricted to the particles
+whose centres lie above $y_{\text{lo}}-2R_{\max}$, which keeps the insertion
+cost proportional to the number of grains near the surface rather than to $N$.
+The small downward seed velocity $v_{\text{rain}}$ removes the initial free-fall
+transient and makes the arrival of successive waves more regular.  The
+termination logic is purely geometric: when the growing bed reaches the
+insertion band, rejection sampling can no longer place anything, $w$ reaches
+$w_{\max}$ and the loop exits.  The number of particles is therefore an
+\emph{output} of the procedure, determined by the geometry and the size
+distribution, not an input.
+
+\paragraph{Honouring the size distribution.}  A radius is drawn once and kept in
+the queue until it is placed.  The first version of the code drew a fresh radius
+at every attempt; because a large candidate is far more likely to overlap an
+existing grain, that biased the packing towards small particles.  Retrying the
+same radius, largest first, removes the bias; only the at most $n_{b}$ radii
+still queued when the domain is full are never placed.  For the reference
+set-up the deposited radii now have a mean of \qty{12.25}{\milli\metre} and a
+standard deviation of \qty{4.67}{\milli\metre}, against
+\qty{12.0}{\milli\metre} and \qty{4.62}{\milli\metre} for the target
+distribution $\mathcal{U}(\qty{4}{\milli\metre},\qty{20}{\milli\metre})$, and
+the box holds \num{179} particles instead of \num{460}.
+
+Default values are collected in Table~\ref{tab:deposition}.
 
 \begin{table}[htbp]
   \centering
-  \caption{Deposition parameters (values used in the reference simulation).}
+  \caption{Deposition parameters, with the values used in the reference
+  simulation.  All are fields of \texttt{RainSettings}, except the quiescence
+  tolerance, which is a field of \texttt{GlobalSettings}.}
   \label{tab:deposition}
   \begin{tabular}{llll}
     \toprule
@@ -435,11 +504,12 @@ in Table~\ref{tab:deposition}.
     $n_{s}$            & steps between waves               & \texttt{steps\_between}  & 450 \\
     $n_{a}$            & placement attempts per particle   & \texttt{attempts}        & 30 \\
     $w_{\max}$         & empty waves before stopping       & \texttt{patience}        & 4 \\
-    $v_{\text{rain}}$  & seed velocity                     & \texttt{\_rain\_speed}   & \qty{0.3}{\metre\per\second} \\
+    $v_{\text{rain}}$  & seed velocity                     & \texttt{rain\_speed}     & \qty{0.3}{\metre\per\second} \\
+    $y_{\text{lo}},y_{\text{hi}}$ & insertion band         & \texttt{insertion\_band} & top of domain \\
     $n_{\text{settle}}$& maximum settling steps            & \texttt{settle\_steps}   & 4000 \\
     $N_{\max}$         & hard cap on particle number       & \texttt{max\_particles}  & 2000 \\
-    $\epsilon$         & quiescence tolerance              & \texttt{quiet\_tol}      & \qty{1e-6}{\joule} \\
-    -- & random seed & \texttt{seed} & 7 \\
+    $\epsilon$         & quiescence tolerance              & \texttt{quiet\_tolerance} & \qty{1e-6}{\joule} \\
+    --                 & random seed                       & \texttt{seed}            & 7 \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -472,21 +542,26 @@ of magnitude below the raining velocity.
 Two output streams are collected at user-defined intervals.
 
 \begin{description}[leftmargin=1.6em,style=nextline]
-  \item[Frames] $\bigl(t,\ \mathbf{x}_{i},\ R_{i},\
-        \lVert\mathbf{v}_{i}\rVert,\ y_{p},\ \text{phase}\bigr)$, recorded every
+  \item[Frames] \texttt{Frame} records
+        $\bigl(t,\ \mathbf{x}_{i},\ R_{i},\ \lVert\mathbf{v}_{i}\rVert,\
+        \text{platen end points},\ \text{phase}\bigr)$ every
         \texttt{record\_every} steps.  Positions and radii are \emph{copied},
         not referenced, because the underlying arrays are overwritten in place
-        and reallocated when particles are appended.  The phase label
+        and reallocated when particles are added or removed.  The phase label
         (\texttt{deposition}, \texttt{settling}, \texttt{loading}) is carried
         along so that the animation can be annotated.
-  \item[Load curve] $\bigl(t,\ F(t),\ u_{p},\ F_{p}\bigr)$, recorded only during
-        the compression stage.  Comparing $F(t)$ with $F_{p}$ is the simplest
-        available check of quasi-staticity: the two curves coincide when the
-        platen inertia is negligible, and separate when the loading is too fast.
+  \item[Load curves] one \texttt{LoadCurve} per platen, with
+        $\bigl(t,\ F(t),\ u_{p},\ F_{p}\bigr)$ recorded during the loading stage
+        only, starting with the seated state at $t=0$.  Comparing $F(t)$ with
+        $F_{p}$ is the simplest available check of quasi-staticity: the two
+        curves coincide when the platen inertia is negligible, and separate when
+        the loading is too fast.
 \end{description}
 
 The number of stored frames, not the number of time steps, dominates the memory
-footprint of a long run: each frame holds $O(N)$ floating-point numbers.
+footprint of a long run: each frame holds $O(N)$ floating-point numbers.  The
+module \texttt{plotting} turns the frames into an animation and the load curves
+into load--time and load--displacement plots.
 
 \section{Verification strategy}
 \label{sec:verification}

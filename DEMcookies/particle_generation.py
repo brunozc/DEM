@@ -1,22 +1,30 @@
-"""Particle definition and gravitational ("raining") deposition.
+"""Particle definition and a lattice generator for an initial loose packing.
 
-Particles are generated on a loose, non-overlapping lattice in the upper part
-of the box.  When the solver starts they fall under gravity and compact into a
-dense random packing - this is the "raining" initialisation.
+The generator places particles on a jittered, non-overlapping lattice inside the domain. When the solver starts
+they fall under gravity and compact into a dense random packing. For filling a domain completely, the wave-by-wave
+raining of ``DEMSimulation.rain_until_full`` is usually more convenient.
 """
 
-from __future__ import annotations
-
+import math
 from dataclasses import dataclass
+from typing import List, Tuple
 
 import numpy as np
 
-from .boundary import Box
+from .geometry import Geometry
 
 
 @dataclass
 class Particle:
-    """A single circular particle (used to build the initial configuration)."""
+    """A single circular particle, used to build an initial configuration.
+
+    Attributes:
+        x: x coordinate of the centre [m].
+        y: y coordinate of the centre [m].
+        radius: radius [m].
+        vx: x component of the velocity [m/s].
+        vy: y component of the velocity [m/s].
+    """
 
     x: float
     y: float
@@ -25,51 +33,61 @@ class Particle:
     vy: float = 0.0
 
 
-def generate_rain_particles(box: Box, n_particles: int,
-                            radius_range: tuple[float, float] = (0.006, 0.012),
-                            seed: int = 0, spacing_factor: float = 1.15,
-                            jitter: float = 0.25) -> list[Particle]:
-    """Create ``n_particles`` on a loose lattice ready to rain down.
+def generate_lattice_particles(geometry: Geometry,
+                               n_particles: int,
+                               radius_range: Tuple[float, float],
+                               seed: int = 0,
+                               spacing_factor: float = 1.15,
+                               jitter: float = 0.25) -> List[Particle]:
+    """Place particles on a loose lattice inside the domain, filling the lowest rows first.
 
-    Parameters
-    ----------
-    box:
-        The container; particles are kept inside the left/right walls.
-    n_particles:
-        Number of particles to create.
-    radius_range:
-        ``(r_min, r_max)`` for the uniformly distributed radii.
-    seed:
-        Seed for the random generator (reproducible packings).
-    spacing_factor:
-        Lattice spacing as a multiple of the largest diameter.  Values > 1
-        guarantee that the initial configuration has no overlaps.
-    jitter:
-        Random in-cell displacement as a fraction of the free space, which
-        breaks the lattice symmetry and yields a more natural packing.
+    Args:
+        geometry: domain to fill.
+        n_particles: number of particles to create.
+        radius_range: smallest and largest radius of the uniformly distributed radii [m].
+        seed: seed of the random generator, for reproducible packings.
+        spacing_factor: lattice spacing as a multiple of the largest diameter; values above one leave room for the
+            jitter.
+        jitter: random displacement of each particle as a fraction of the free space between lattice sites, which
+            breaks the lattice symmetry.
+
+    Returns:
+        The particles.
+
+    Raises:
+        ValueError: if the radius range is not 0 < r_min <= r_max.
+        ValueError: if the spacing factor is below one.
+        ValueError: if the jitter is not in [0, 1].
+        ValueError: if fewer lattice sites fit in the domain than particles are requested.
     """
-    rng = np.random.default_rng(seed)
     r_min, r_max = radius_range
-    d_max = 2.0 * r_max
-    spacing = d_max * spacing_factor
+    if not 0.0 < r_min <= r_max:
+        raise ValueError(f"radius_range must satisfy 0 < r_min <= r_max, got {radius_range}.")
+    if spacing_factor < 1.0:
+        raise ValueError(f"spacing_factor must be at least 1, got {spacing_factor}.")
+    if not 0.0 <= jitter <= 1.0:
+        raise ValueError(f"jitter must be in [0, 1], got {jitter}.")
 
-    # how many columns fit between the side walls
-    usable_width = box.width - d_max
-    n_cols = max(1, int(usable_width // spacing) + 1)
-    x0 = r_max
-    # maximum jitter that still cannot create an overlap
-    jitter_amp = jitter * 0.5 * (spacing - d_max)
+    rng = np.random.default_rng(seed)
+    spacing = 2.0 * r_max * spacing_factor
+    # neighbours can each move by this much along a lattice direction and still not overlap
+    jitter_amplitude = jitter * 0.5 * (spacing - 2.0 * r_max)
+    # the jitter acts on both coordinates, so a site can move diagonally by sqrt(2) times the amplitude
+    clearance = r_max + math.sqrt(2.0) * jitter_amplitude
 
-    particles: list[Particle] = []
-    for k in range(n_particles):
-        col = k % n_cols
-        row = k // n_cols
-        radius = float(rng.uniform(r_min, r_max))
-        x = x0 + col * spacing + float(rng.uniform(-jitter_amp, jitter_amp))
-        y = r_max + row * spacing + float(rng.uniform(-jitter_amp, jitter_amp))
-        # keep the particle between the side walls
-        x = min(max(x, radius), box.width - radius)
-        particles.append(Particle(x, y, radius))
+    x_min, y_min, x_max, y_max = geometry.bounding_box
+    xs = np.arange(x_min + clearance, x_max - clearance + 0.5 * spacing, spacing)
+    ys = np.arange(y_min + clearance, y_max - clearance + 0.5 * spacing, spacing)
+    grid_y, grid_x = np.meshgrid(ys, xs, indexing="ij")
+    sites = np.column_stack((grid_x.ravel(), grid_y.ravel()))
+    fits = geometry.contains(sites) & (geometry.distance_to_edges(sites).min(axis=1) >= clearance)
+    sites = sites[fits]
+    if sites.shape[0] < n_particles:
+        raise ValueError(f"Only {sites.shape[0]} lattice sites fit in the domain, but {n_particles} particles were "
+                         f"requested.")
 
-    return particles
-
+    sites = sites[:n_particles]
+    radii = rng.uniform(r_min, r_max, n_particles)
+    offsets = rng.uniform(-jitter_amplitude, jitter_amplitude, (n_particles, 2))
+    centres = sites + offsets
+    return [Particle(float(x), float(y), float(r)) for (x, y), r in zip(centres, radii)]
