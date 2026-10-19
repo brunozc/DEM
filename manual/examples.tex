@@ -994,6 +994,158 @@ consolidation.
   \label{fig:consolidation}
 \end{figure}
 
+\section{Railway ballast under cyclic loading}
+\label{sec:ballast}
+
+The script \texttt{examples/ballast\_cyclic.py} asks how the presence of water
+changes the response of railway ballast to traffic.  The model is a
+longitudinal section through the track that holds one sleeper bay
+(Figure~\ref{fig:ballast-snapshots}): a sleeper with a base
+\qty{0.25}{\metre} wide rests on \qty{0.3}{\metre} of ballast on a rigid
+formation, and ballast fills the cribs on both sides of it.  The side walls are
+smooth planes of symmetry halfway to the neighbouring sleepers, so the box is
+one sleeper spacing, \qty{0.6}{\metre}, wide.  The grains have radii in
+$[15,25]$~\unit{\milli\metre}, the size of real ballast, and are made of a
+granite-like material: $\rho=\qty{2650}{\kilogram\per\cubic\metre}$,
+$E=\qty{5}{\giga\pascal}$ (ten times softer than granite, to keep the time
+step at \qty{1.18e-5}{\second}), $\nu=0.25$, $e=0.5$, $\mu=0.7$ and a rolling
+friction $\mu_{r}=0.3$.  The sleeper is a \texttt{LoadedPlaten} on three edges
+-- its base and its two sides, which reach the top of the box so that crib
+ballast cannot spill onto it -- with a mass of \qty{4}{\kilogram}, the share of
+a \qty{300}{\kilogram} sleeper in a slice as thick as a grain, and its own
+weight.
+
+\paragraph{Rolling resistance is essential.}  Round grains are far too weak for
+track loads.  In a preliminary calibration (one packing, $E=\qty{0.5}{\giga\pascal}$,
+ten cycles of the load below) the sleeper punched \qty{165}{\milli\metre} into
+the bed without rolling resistance, and settled by \qtylist{20;4.2;1.5}{\milli\metre}
+with $\mu_{r}=0.15$, $0.3$ and $0.5$.  With $\mu_{r}=0.3$ the bed shows the
+behaviour of real ballast, a large first cycle followed by a decaying rate of
+settlement, so that value is used here.  It is a calibration, not a measured
+property (Section~\ref{sec:limitations}).
+
+\paragraph{Procedure.}  The ballast is deposited dry in two passes.  The first
+fills the bed under the sleeper, which is then lowered onto it with
+\texttt{seat\_platens()} -- seated but not yet released -- and the second fills
+the cribs around it.  The bed ends with some \num{140} to \num{150} grains, the
+sleeper base \qtyrange{0.275}{0.284}{\metre} above the formation and the cribs
+about \qty{0.51}{\metre} high.  Each packing is then loaded in three cases:
+dry; with the water table halfway down the ballast under the sleeper; and
+saturated, with the water at the top of the cribs.  After \qty{0.3}{\second} of
+rest the sleeper receives \num{50} cycles of a \qty{5}{\hertz} load from zero
+to \qty{2}{\kilo\newton}.  Dividing the load by the base width and by the
+thickness of the slice, the volume of mixture over the area of the bed, gives a
+peak pressure of \qty{207}{\kilo\pascal} on the sleeper base, typical of
+heavily loaded track.  Because a bed of this size depends on its packing, five
+packings are deposited, and all fifteen runs are made in parallel:
+\begin{verbatim}
+  python manual/scripts/ballast.py
+\end{verbatim}
+
+\paragraph{Drained water.}  Clean ballast is extremely permeable.  With the
+permeability~\eqref{eq:permeability} of these grains, $k\approx\qty{2e-6}{\metre\squared}$,
+and a constrained modulus of the bed of order \qty{40}{\mega\pascal}, the
+coefficient of consolidation is of order \qty{e4}{\metre\squared\per\second},
+so the bed drains in microseconds, against a loading period of
+\qty{0.2}{\second}.  The water is therefore drained: it only buoys the grains
+below the water table and drags on them when they move.  A coupled run of the
+saturated case over two cycles confirms it: the largest excess pore pressure
+under the sleeper is \qty{4.6}{\pascal}, \num{0.002}\% of the pressure on the
+base.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{figures/ballast_dry.png}
+    \caption{dry}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{figures/ballast_half.png}
+    \caption{water table at half depth}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.32\textwidth}
+    \includegraphics[width=\textwidth]{figures/ballast_saturated.png}
+    \caption{saturated}
+  \end{subfigure}
+  \caption{The first packing after \num{50} load cycles, with the sleeper (red)
+  and the water (blue).}
+  \label{fig:ballast-snapshots}
+\end{figure}
+
+\paragraph{Results.}  Table~\ref{tab:ballast} and Figure~\ref{fig:ballast}
+summarise the runs.  In every case the settlement does not grow smoothly: it
+advances in sudden steps of \qtyrange{2}{8}{\milli\metre}, each the collapse of
+a grain arrangement under the sleeper, separated by long stretches of slow
+creep.  With only six grains across the sleeper base, every such event is
+large, and when it happens is chaotic: the three cases of one packing, which
+start from the same state, collapse at different cycles.  The scatter between
+packings, \qty{\pm 4.5}{\milli\metre} after \num{50} cycles, is therefore larger
+than any difference between the cases, and the order of the cases changes from
+packing to packing (Figure~\ref{fig:ballast}, top right).  Comparing the cases
+packing by packing removes the scatter between packings, and leaves one hint: the
+saturated bed settled more than the dry one in four packings out of five, by
+\qty{1.0}{\milli\metre} on average with a standard deviation of
+\qty{1.0}{\milli\metre}, about a tenth of the settlement.  A paired $t$-test gives
+$p=0.10$, so the difference is not significant; confirming one of this size would
+take some ten packings.  The water table at half depth shows no consistent
+trend.  The resilient displacement, about \qty{1.5}{\milli\metre} per cycle, is
+the same in all cases within its scatter.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Sleeper settlement under \num{50} cycles of \qtyrange{0}{2}{\kilo\newton}
+  at \qty{5}{\hertz}: mean and standard deviation over five packings.  The
+  buoyancy is the upward force of the water on the grains at rest, and the late
+  rate the mean settlement per cycle over the last \num{25} cycles.}
+  \label{tab:ballast}
+  \begin{tabular}{llS[table-format=2.1]cccS[table-format=1.2]}
+    \toprule
+    Case & water table & {buoyancy} & \multicolumn{2}{c}{settlement [\unit{\milli\metre}]} & late rate & {resilient} \\
+    \cmidrule(lr){4-5}
+         & [\unit{\metre}] & {[\unit{\newton}]} & cycle 1 & cycle 50 & [\unit{\micro\metre}/cycle] & {[\unit{\milli\metre}]} \\
+    \midrule
+    dry       & --            & 0    & $3.80 \pm 4.44$ & $9.44 \pm 4.56$ & 98 & 1.59 \\
+    half      & 0.137--0.142  & 17.6 & $4.17 \pm 5.25$ & $7.91 \pm 4.87$ & 76 & 1.51 \\
+    saturated & 0.510--0.517  & 49.8 & $4.12 \pm 4.55$ & $10.44 \pm 4.19$ & 86 & 1.37 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/ballast_settlement.png}
+  \caption{Ballast under cyclic loading.  Top left: permanent settlement of the
+  sleeper after every cycle, for every packing (thin) and on average (thick).
+  Top right: settlement after \num{50} cycles of every packing.  Bottom left:
+  resilient displacement, mean and standard deviation.  Bottom right:
+  load--displacement loop of the last cycle of the first packing.}
+  \label{fig:ballast}
+\end{figure}
+
+\paragraph{Why the water makes so little difference.}  The only mechanical effect
+of drained water on a clean, static bed is buoyancy, and buoyancy changes only
+the stresses due to the weight of the grains.  For the saturated bed it takes
+49.8~\unit{\newton} off the weight of the ballast, \num{2.5}\% of the
+peak sleeper load; the effective vertical stress of the crib ballast at the
+level of the sleeper base falls from about \qty{3.7}{\kilo\pascal} to
+\qty{2.3}{\kilo\pascal}, against \qty{207}{\kilo\pascal} under the sleeper.
+That weight confines the ballast under the sleeper and resists its spreading
+into the cribs, so if the hint above is real, it has the expected sign.  The
+drag is negligible too: the grains under the sleeper move at most at about
+\qty{2}{\centi\metre\per\second}, at which the drag on a grain is below one per
+cent of its weight.  The
+model thus predicts that water in clean, free-draining ballast changes the
+settlement by at most about a tenth, less than the variability of the packing.
+This agrees with the view of track engineering that clean ballast is not
+weakened by water itself; the damage that water does to track comes from
+fouled ballast, which drains slowly and lets fines be pumped up, and from a
+saturated, softened subgrade~\cite{selig1994}.  None of those mechanisms is in
+this model: the formation is rigid, the ballast has no fines, and wet grain
+surfaces have the same friction as dry ones and do not break.  The suggested
+studies below list how some of them could be added.
+
 \section{Suggested further studies}
 \label{sec:further}
 
@@ -1050,6 +1202,19 @@ natural next steps and are directly supported by the existing interfaces.
         contract, the excess pore pressure should accumulate from cycle to cycle
         until the effective stress, measured on the floor, vanishes.  Comparing
         loose and dense packings would show the role of dilatancy.
+  \item \textbf{Fouled ballast.}  Repeat the saturated ballast case of
+        Section~\ref{sec:ballast} with coupled water whose viscosity is raised
+        until the bed drains like fouled ballast.  The bulk modulus of the
+        water must then be raised as well, towards its real value, so that it
+        stays much stiffer than the ballast skeleton, whose constrained
+        modulus is of order \qty{40}{\mega\pascal}; the stiff grains keep the
+        time step small enough to afford it.  Whether excess pore pressure
+        then accumulates from cycle to cycle is the question.
+  \item \textbf{Wet friction and a soft formation.}  Two effects of water that
+        the ballast study leaves out would need new inputs: a lower friction
+        coefficient for contacts below the water table, and a formation that
+        deforms instead of a rigid wall, e.g.\ a layer of fine, soft particles
+        whose stiffness falls when it is saturated.
   \item \textbf{Two-way coupled flow.}  The coupled model solves the excess
         pressure but not the motion of the water itself.  Dilute, fast flows --
         a bed fluidized well beyond $U_{mf}$, a sediment plume -- would need the

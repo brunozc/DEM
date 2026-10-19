@@ -383,8 +383,93 @@ factor simplifies to the signed tangential force,
   \quad
   T_{ji} = -R_{j}\,(\mathbf{F}_{t}\cdot\mathbf{t}).
 \end{equation}
-No rolling resistance is added, so a lone particle on a flat wall keeps spinning
-indefinitely once it has been set into rotation.
+Without rolling resistance ($\mu_{r}=0$, the default) these are the only
+torques, so a lone particle on a flat wall keeps spinning indefinitely once it
+has been set into rotation.
+
+\section{Rolling resistance}
+\label{sec:rolling}
+
+Spheres and discs roll past each other far too easily.  Angular grains cannot:
+a grain resting on a flat facet must lift its centre over the edge of the facet
+before it can roll, so a packing of angular grains such as railway ballast is
+much stronger than one of round particles with the same friction.  The standard
+surrogate for that shape effect is a moment that resists the relative rotation
+of two bodies in contact~\cite{iwashita1998}.  DEMcookies uses the
+elastic--plastic spring--dashpot model, type~C in the classification of Ai et
+al.~\cite{ai2011}.
+
+\paragraph{Rolling history.}  The relative rotation of the two bodies is
+\begin{equation}
+  \omega_{r} = \omega_{i} - \omega_{j},
+  \qquad
+  \theta_{r} \;\leftarrow\; \theta_{r} + \omega_{r}\,\Delta t ,
+  \label{eq:theta-r}
+\end{equation}
+with $\omega_{j}=0$ for a wall or platen, which never rotates.  Like the
+tangential spring, $\theta_{r}$ starts from zero when a contact closes and is
+deleted when it opens.  A rigid rotation of the two bodies together leaves
+$\omega_{r}=0$, so the measure is objective.
+
+\paragraph{Moment.}  The trial moment on body $i$ combines a spring and a
+dashpot,
+\begin{equation}
+  M_{r}^{\mathrm{trial}} = -k_{r}\,\theta_{r} - c_{r}\,\omega_{r},
+  \qquad
+  k_{r} = 2.25\,\mu_{r}^{2}\,R^{*2}\,S_{n},
+  \qquad
+  c_{r} = 2\sqrt{\tfrac{5}{6}}\;\beta\;\sqrt{k_{r}\,I_{r}} ,
+  \label{eq:Mr-trial}
+\end{equation}
+where $\mu_{r}$ is the rolling friction coefficient of the material and $S_{n}$
+the tangent normal stiffness~\eqref{eq:Sn}.  The stiffness is that of Ai et
+al., written with the Hertzian $S_{n}$ in place of a linear normal spring.  The
+damping follows the normal and tangential dashpots, built on the effective
+moment of inertia about the contact point, about which a grain rolls:
+\begin{equation}
+  \frac{1}{I_{r}} = \frac{1}{I_{i}+m_{i}R_{i}^{2}} + \frac{1}{I_{j}+m_{j}R_{j}^{2}},
+  \qquad
+  I_{r} = I_{i}+m_{i}R_{i}^{2} = 1.4\,m_{i}R_{i}^{2}\ \text{against a wall}.
+\end{equation}
+
+\paragraph{Plastic limit.}  The moment is capped, and the spring reset, exactly
+as the tangential force is by~\eqref{eq:coulomb}:
+\begin{equation}
+  \boxed{\;
+  \lvert M_{r}^{\mathrm{trial}}\rvert \le \mu_{r} R^{*} F_{n}:
+    \ M_{r} = M_{r}^{\mathrm{trial}};
+  \qquad
+  \text{otherwise}\ \
+  M_{r} = \mu_{r} R^{*} F_{n}\,\operatorname{sign}M_{r}^{\mathrm{trial}},
+  \quad \theta_{r} = -\frac{M_{r}}{k_{r}} .\;}
+  \label{eq:rolling-limit}
+\end{equation}
+The limit has a simple meaning: $\mu_{r}R^{*}$ is the largest lever arm of the
+normal force about the centre, as if the grain stood on a flat facet of
+half-width $\mu_{r}R^{*}$.  Body $i$ receives $M_{r}$ and body $j$ the opposite
+moment, $-M_{r}$; no force is involved.
+
+\paragraph{Closed-form check.}  A sphere on an incline of angle $\alpha$, with
+enough friction not to slide, is held by the rolling moment as long as the
+moment of its weight about the contact point, $mgR\sin\alpha$, stays below
+$\mu_{r}R\,mg\cos\alpha$, i.e.\ while $\tan\alpha<\mu_{r}$.  On a steeper
+incline it rolls with the constant acceleration
+\begin{equation}
+  a = \frac{g\,(\sin\alpha - \mu_{r}\cos\alpha)}{1 + I/(mR^{2})}
+    = \frac{g\,(\sin\alpha - \mu_{r}\cos\alpha)}{1.4} ,
+  \label{eq:incline}
+\end{equation}
+which reduces to the textbook $g\sin\alpha/1.4$ without rolling resistance.
+The test suite checks both: a \qty{10}{\milli\metre} sphere with $\mu_{r}=0.4$
+on a gradient of $0.32$ moves only by the \qty{40}{\micro\metre} of elastic
+deformation of its springs, while on a gradient of $0.48$ the simulated
+accelerations for $\mu_{r}=0$, $0.2$ and $0.4$ match~\eqref{eq:incline} to four
+significant digits (\qtylist{3.0322;1.7688;0.5054}{\metre\per\second\squared}).
+
+\paragraph{Choice of $\mu_{r}$.}  Values of $0.05$ to $0.5$ cover round to very
+angular grains~\cite{ai2011}.  The rolling mode does not shorten the stable time
+step: its angular frequency $\sqrt{k_{r}/I_{r}}$ is at most $1.27\,\mu_{r}$
+times the normal one, so below it for $\mu_{r}<0.79$.
 
 \section{Summary of the contact law}
 \label{sec:contact-summary}
@@ -407,6 +492,10 @@ R^{*},m^{*})$, one evaluation of the constitutive law proceeds as follows.
         correction~\eqref{eq:coulomb}.
   \item Assemble $\mathbf{F}=F_{n}\mathbf{n}+\mathbf{F}_{t}$ and return
         $\mathbf{F}$, $\mathbf{F}_{t}$ and the updated $\boldsymbol{\xi}$.
+  \item If $\mu_{r}>0$: accumulate $\theta_{r}$ with~\eqref{eq:theta-r}, form
+        the trial moment~\eqref{eq:Mr-trial}, cap it
+        with~\eqref{eq:rolling-limit} and return $M_{r}$ and the updated
+        $\theta_{r}$.
 \end{enumerate}
 
 Table~\ref{tab:constants} lists the derived constants for the material used in
@@ -426,6 +515,7 @@ the reference simulation of Chapter~\ref{cha:examples}.
     $\nu$    & Poisson ratio                  & 2.5000e-1 & -- \\
     $e$      & coefficient of restitution     & 4.0000e-1 & -- \\
     $\mu$    & friction coefficient           & 5.0000e-1 & -- \\
+    $\mu_{r}$ & rolling friction coefficient  & 0         & -- \\
     \midrule
     $G$      & shear modulus, Eq.~\eqref{eq:moduli}      & 2.0000e6 & \unit{\pascal} \\
     $E^{*}$  & effective normal modulus                  & 2.6667e6 & \unit{\pascal} \\

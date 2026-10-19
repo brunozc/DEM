@@ -5,7 +5,13 @@ The model follows the classic non-linear formulation used in most DEM codes (e.g
 * normal force: F_n = 4/3 E* sqrt(R*) delta_n^(3/2) (Hertz);
 * tangential force: F_t = -S_t xi_t (Mindlin spring);
 * viscous damping proportional to the contact stiffness and set by the coefficient of restitution;
-* Coulomb limit: |F_t| <= mu F_n (sliding friction).
+* Coulomb limit: |F_t| <= mu F_n (sliding friction);
+* optional rolling resistance: an elastic-plastic spring with a dashpot between the rotations of the two bodies,
+  limited to |M_r| <= mu_r R* F_n (the EPSD, or type C, model of Ai et al., 2011).
+
+Rolling resistance stands in for the shape of the grains. Round particles roll past each other far too easily, so a
+packing of discs or spheres is much weaker than one of angular grains such as railway ballast; resisting the relative
+rotation of the particles in contact restores much of that strength.
 
 All particles and boundaries share one material, so the effective moduli ``E*`` and ``G*`` and the damping factor
 ``beta`` are computed once. The effective radius ``R*``, the effective mass ``m*`` and the friction coefficient may
@@ -32,6 +38,8 @@ class MaterialProperties:
         poisson_ratio: Poisson ratio.
         restitution: coefficient of restitution, in [0, 1].
         friction: Coulomb friction coefficient.
+        rolling_friction: rolling resistance coefficient mu_r, the largest rolling moment over R* F_n. Zero, the
+            default, lets particles roll freely; values of 0.05 to 0.5 emulate increasingly angular grains.
     """
 
     density: float
@@ -39,6 +47,7 @@ class MaterialProperties:
     poisson_ratio: float
     restitution: float
     friction: float
+    rolling_friction: float = 0.0
 
     def __post_init__(self) -> None:
         """Validate the material.
@@ -49,6 +58,7 @@ class MaterialProperties:
             ValueError: if the Poisson ratio is not in (-1, 0.5).
             ValueError: if the restitution is not in [0, 1].
             ValueError: if the friction coefficient is negative.
+            ValueError: if the rolling friction coefficient is negative.
         """
         if self.density <= 0.0:
             raise ValueError(f"density must be positive, got {self.density}.")
@@ -60,6 +70,8 @@ class MaterialProperties:
             raise ValueError(f"restitution must be in [0, 1], got {self.restitution}.")
         if self.friction < 0.0:
             raise ValueError(f"friction must be non-negative, got {self.friction}.")
+        if self.rolling_friction < 0.0:
+            raise ValueError(f"rolling_friction must be non-negative, got {self.rolling_friction}.")
 
     @property
     def shear_modulus(self) -> float:
@@ -101,11 +113,29 @@ class ContactForces:
         force: total contact force on body i, shape (k, 2) [N].
         tangential_force: tangential part of the force, used for the torque, shape (k, 2) [N].
         tangential_spring: updated tangential displacement of each contact, shape (k, 2) [m].
+        normal_force: magnitude of the normal force, shape (k,) [N].
+        normal_stiffness: tangent normal stiffness S_n = 2 E* a of each contact, zero when it is open, shape (k,)
+            [N/m].
     """
 
     force: npt.NDArray[np.float64]
     tangential_force: npt.NDArray[np.float64]
     tangential_spring: npt.NDArray[np.float64]
+    normal_force: npt.NDArray[np.float64]
+    normal_stiffness: npt.NDArray[np.float64]
+
+
+@dataclass(frozen=True, eq=False)
+class RollingMoments:
+    """Result of evaluating the rolling resistance of a batch of contacts.
+
+    Attributes:
+        moment: rolling moment on body i; body j receives the opposite, shape (k,) [N m].
+        rolling_spring: updated relative rotation stored in each contact, shape (k,) [rad].
+    """
+
+    moment: npt.NDArray[np.float64]
+    rolling_spring: npt.NDArray[np.float64]
 
 
 class HertzMindlinModel:
@@ -133,6 +163,7 @@ class HertzMindlinModel:
         ln_e = math.log(restitution)
         self.beta = abs(ln_e / math.sqrt(ln_e * ln_e + math.pi * math.pi))
         self.friction = material.friction
+        self.rolling_friction = material.rolling_friction
 
     def evaluate(self,
                  normal: npt.NDArray[np.float64],
@@ -190,4 +221,47 @@ class HertzMindlinModel:
 
         spring[~in_contact] = 0.0
         force = f_n[:, None] * normal + f_t
-        return ContactForces(force=force, tangential_force=f_t, tangential_spring=spring)
+        return ContactForces(force=force,
+                             tangential_force=f_t,
+                             tangential_spring=spring,
+                             normal_force=f_n,
+                             normal_stiffness=np.where(in_contact, s_n, 0.0))
+
+    def rolling(self, contact: ContactForces, relative_spin: npt.NDArray[np.float64],
+                rolling_spring: npt.NDArray[np.float64], time_step: float, effective_radius: npt.NDArray[np.float64],
+                rolling_inertia: npt.NDArray[np.float64]) -> RollingMoments:
+        """Evaluate the rolling resistance of a batch of k contacts between bodies i and j.
+
+        The relative rotation of the two bodies is stored in a spring of stiffness k_r = 2.25 mu_r^2 R*^2 S_n, damped
+        like the other springs of the contact law, and its moment is capped at mu_r R* F_n. A capped spring is reset
+        to the moment it carries, so the contact rolls plastically and, when the rotation reverses, unloads
+        elastically (Ai et al., 2011).
+
+        Args:
+            contact: forces of the same contacts, from ``evaluate``.
+            relative_spin: angular velocity of body i minus that of body j, shape (k,) [rad/s].
+            rolling_spring: stored relative rotations, shape (k,) [rad].
+            time_step: increment over which the relative spin is accumulated into the spring; zero re-evaluates the
+                moments of the current state without advancing the history [s].
+            effective_radius: effective radii R*, shape (k,) [m].
+            rolling_inertia: effective moment of inertia of the two bodies about the contact point, shape (k,)
+                [kg m^2].
+
+        Returns:
+            The rolling moments on body i and the updated springs. Open contacts, and every contact when the
+            rolling friction is zero, get no moment and a reset spring.
+        """
+        mu_r = self.rolling_friction
+        stiffness = 2.25 * mu_r * mu_r * effective_radius * effective_radius * contact.normal_stiffness
+        spring = rolling_spring + relative_spin * time_step
+        damping = DAMPING_CONSTANT * self.beta * np.sqrt(stiffness * rolling_inertia)
+        moment = -stiffness * spring - damping * relative_spin
+
+        limit = mu_r * effective_radius * contact.normal_force
+        rolling = np.abs(moment) > limit
+        # an open contact, or a free one, has a zero stiffness and must not divide by it
+        loaded = rolling & (stiffness > 0.0)
+        moment[rolling] = np.sign(moment[rolling]) * limit[rolling]
+        spring[loaded] = -moment[loaded] / stiffness[loaded]
+        spring[stiffness <= 0.0] = 0.0
+        return RollingMoments(moment=moment, rolling_spring=spring)

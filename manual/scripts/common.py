@@ -2,6 +2,7 @@
 
 import importlib.util
 import math
+import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Tuple
@@ -32,6 +33,8 @@ def load_script(path: Path) -> ModuleType:
     if spec is None or spec.loader is None:
         raise ImportError(f"Cannot load {path}.")
     module = importlib.util.module_from_spec(spec)
+    # registered so that worker processes can unpickle the functions the script hands them
+    sys.modules[path.stem] = module
     spec.loader.exec_module(module)
     return module
 

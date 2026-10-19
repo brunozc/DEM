@@ -311,18 +311,21 @@ hundred particles, and the gain grows with $N$.
 \section{Tangential-history bookkeeping}
 \label{sec:history}
 
-The tangential spring $\boldsymbol{\xi}$ must persist as long as the contact
-exists and must disappear with it.  It is stored next to the pair it belongs to:
+The tangential spring $\boldsymbol{\xi}$ and the rolling spring $\theta_{r}$
+must persist as long as the contact exists and must disappear with it.  They
+are stored next to the pair they belong to:
 \begin{center}
 \begin{tabular}{ll}
   \toprule
   Storage & Contact \\
   \midrule
   \texttt{NeighbourList.spring[k]} & particle pair $k$ of the neighbour list, $(i,j)$ with $i<j$ \\
-  wall springs \texttt{[i, s]} & particle $i$ -- solid edge $s$ (wall or platen) \\
+  \texttt{NeighbourList.rolling[k]} & the same pair, rolling spring \\
+  wall springs \texttt{[i, s]} & particle $i$ -- solid edge $s$ (wall or platen), both springs \\
   \bottomrule
 \end{tabular}
 \end{center}
+The rolling springs follow every rule below exactly like the tangential ones.
 
 This storage provides the three required behaviours:
 \begin{enumerate}[leftmargin=2.2em]
@@ -778,10 +781,15 @@ include.
         $\boldsymbol{\xi}$ when the contact plane rotates quickly; the error is
         $O(\Delta t^{2})$ per step but accumulates in long-lived rolling
         contacts.
-  \item \emph{Absence of rolling resistance}: a two-dimensional assembly of
-        smooth discs is unrealistically free to roll, which under-predicts the
-        shear strength and the angle of repose.  Adding a rolling-friction
-        torque is the single most valuable extension of the present model.
+  \item \emph{Particle shape}: a two-dimensional assembly of round particles
+        is unrealistically free to roll, which under-predicts the shear
+        strength and the angle of repose.  The rolling resistance of
+        Section~\ref{sec:rolling} restores much of that strength, but
+        $\mu_{r}$ is a calibration parameter, not a measured property: it
+        should be fitted to the angle of repose or to a shear test of the
+        real material.  The ballast study of
+        Section~\ref{sec:ballast} shows how strongly the response depends on
+        it.
   \item \emph{Boundary effects}: with $B/\bar{d}\approx 8$ grain diameters
         across, wall friction carries a large share of the load (Janssen
         effect).  In the reference run the side walls carry \num{22}\% of the
