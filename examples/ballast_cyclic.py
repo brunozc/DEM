@@ -18,7 +18,8 @@ parallel; only differences larger than the scatter between packings say somethin
 
     python examples/ballast_cyclic.py
 
-and the settlement curves, their data and snapshots of the first packing are written to ``output/``. The five
+and the settlement curves, their data, and snapshots and animations of the first packing are written to
+``output/``. The five
 packings and three cases run as fifteen parallel processes; on sixteen cores that takes about twenty minutes.
 """
 
@@ -34,7 +35,7 @@ import numpy.typing as npt
 
 from DEMcookies import (BoundaryCondition, DEMSimulation, Geometry, LoadedPlaten, MaterialProperties, Open,
                         RainSettings, Sinusoidal, Wall, Water)
-from DEMcookies.plotting import render_frame
+from DEMcookies.plotting import render_animation, render_frame
 
 OUTPUT_DIR = "output"
 
@@ -72,6 +73,29 @@ SETTLE_TIME = 0.3
 REST_TIME = 0.3
 RECORD_INTERVAL = 0.005
 COUPLED_CYCLES = 2
+# the animations show every tenth record, four per load cycle, at twenty frames per second
+ANIMATION_STRIDE = 10
+ANIMATION_FPS = 20
+
+
+@dataclass(frozen=True, eq=False)
+class CaseTask:
+    """One packing loaded in one case.
+
+    Attributes:
+        sim: deposited simulation. It arrives as a copy in the worker process, so the cases of one packing start
+            from the same state.
+        case: name of the case, one of CASES.
+        packing: index of the packing.
+        output_dir: directory of the snapshot and the animation of the first packing.
+        animate: whether the first packing is animated as well.
+    """
+
+    sim: DEMSimulation
+    case: str
+    packing: int
+    output_dir: str
+    animate: bool
 
 
 @dataclass(frozen=True, eq=False)
@@ -186,18 +210,18 @@ def sleeper_base(sim: DEMSimulation) -> float:
     return float(sim.platens[0].starts[:, 1].min())
 
 
-def run_case(task: Tuple[DEMSimulation, str, int, str]) -> CaseResult:
+def run_case(task: CaseTask) -> CaseResult:
     """Flood a deposited packing, if the case has water, and load it cyclically.
 
     Args:
-        task: deposited simulation, name of the case, index of the packing and directory of the snapshot of the
-            first packing. The simulation arrives as a copy in the worker process, so the cases of one packing start
-            from the same state.
+        task: packing and case to run.
 
     Returns:
         The response of the sleeper.
     """
-    sim, case, packing, output_dir = task
+    sim, case, packing = task.sim, task.case, task.packing
+    # the animation shows this case from flooding on, not the deposition it shares with the other cases
+    sim.frames.clear()
     level = water_level(sim, case)
     if level is not None:
         sim.set_water(Water(level=level))
@@ -216,7 +240,12 @@ def run_case(task: Tuple[DEMSimulation, str, int, str]) -> CaseResult:
     peak = np.full(CYCLES, -np.inf)
     np.maximum.at(peak, cycle, displacement)
     if packing == 0:
-        render_frame(sim, os.path.join(output_dir, f"ballast_{case}.png"), width=5.0)
+        render_frame(sim, os.path.join(task.output_dir, f"ballast_{case}.png"), width=5.0)
+        if task.animate:
+            render_animation(sim,
+                             os.path.join(task.output_dir, f"ballast_{case}.gif"),
+                             fps=ANIMATION_FPS,
+                             every=ANIMATION_STRIDE)
     return CaseResult(case, packing, level, base, buoyancy, time, displacement, residual, peak)
 
 
@@ -333,11 +362,12 @@ def save_results(results: Dict[str, List[CaseResult]], path: str) -> None:
     np.savez(path, **arrays)
 
 
-def main(output_dir: str = OUTPUT_DIR) -> None:
+def main(output_dir: str = OUTPUT_DIR, animate: bool = True) -> None:
     """Deposit the packings, load every case and write the results.
 
     Args:
         output_dir: directory of the figures.
+        animate: whether the first packing of every case is animated as well.
     """
     os.makedirs(output_dir, exist_ok=True)
     with ProcessPoolExecutor(max_workers=min(os.cpu_count() or 1, PACKINGS * len(CASES) + 1)) as pool:
@@ -346,7 +376,9 @@ def main(output_dir: str = OUTPUT_DIR) -> None:
             print(f"packing {packing}: {sim.n} grains, ballast under the sleeper {sleeper_base(sim):.3f} m, "
                   f"crib top {sim.bed_top():.3f} m")
         check = pool.submit(coupled_check, packings[0])
-        tasks = [(sim, case, packing, output_dir) for packing, sim in enumerate(packings) for case in CASES]
+        tasks = [
+            CaseTask(sim, case, packing, output_dir, animate) for packing, sim in enumerate(packings) for case in CASES
+        ]
         results: Dict[str, List[CaseResult]] = {case: [] for case in CASES}
         for result in pool.map(run_case, tasks):
             results[result.case].append(result)

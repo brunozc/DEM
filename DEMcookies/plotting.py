@@ -172,21 +172,25 @@ class _FramePainter:
         return [circles, self.title, self.water, *self.bodies]
 
 
-def render_animation(sim: DEMSimulation, path: str, fps: int = 25) -> None:
+def render_animation(sim: DEMSimulation, path: str, fps: int = 25, every: int = 1) -> None:
     """Write an animated GIF of the recorded frames, with the particles coloured by speed.
 
     Args:
         sim: simulation whose frames are drawn.
         path: output file [GIF].
         fps: frames per second of the animation.
+        every: draw every n-th recorded frame, which keeps the animation of a long run short.
 
     Raises:
+        ValueError: if every is not positive.
         ValueError: if the simulation has no recorded frames.
     """
+    if every < 1:
+        raise ValueError(f"every must be at least 1, got {every}.")
     painter = _FramePainter(sim)
     animation = FuncAnimation(painter.figure,
                               painter.draw,
-                              frames=len(painter.frames),
+                              frames=range(0, len(painter.frames), every),
                               interval=1000 // fps,
                               blit=False)
     animation.save(path, writer=PillowWriter(fps=fps))
