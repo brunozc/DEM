@@ -3,8 +3,10 @@
 
 This chapter validates the implementation against closed-form solutions,
 quantifies the accuracy of the contact model in a controlled single-collision
-experiment, and finally applies the model to the full deposition--compression
-problem of Section~\ref{sec:problem}.  Every number reported here was produced
+experiment, applies the model to the full deposition--compression problem of
+Section~\ref{sec:problem}, and finally to two problems with general geometry: a
+strip footing in a trapezoidal container and a curved indenter in a stepped
+container.  Every number reported here was produced
 with the code in this repository; the commands needed to reproduce them are
 given with each example.
 
@@ -15,8 +17,16 @@ The automated test suite is executed with
 \begin{verbatim}
   python -m pytest tests/ -q
 \end{verbatim}
-and consists of four tests, each isolating one equation of
-Chapter~\ref{cha:formulation}.  All four pass.
+and contains \num{112} tests, grouped by module, which include checks that
+invalid input is rejected with a specific message.  The four examples below each
+isolate one equation of Chapter~\ref{cha:formulation}.  Further tests compare
+complete simulations with closed-form results: the static Hertz overlap of a
+particle resting on a wall, a single contact for a particle on or next to a
+vertex shared by two edges, conservation of momentum in an oblique collision,
+the equilibrium of a strip footing, of a platen on a side wall and of a
+V-shaped body of two edges that touches a particle with its tip, the removal of
+particles through an open edge, and the filling of a trapezoidal domain.  All
+tests pass.
 
 \subsection{Example 1 -- free fall of a single body}
 
@@ -112,16 +122,16 @@ factors.
 
 \subsection{Set-up}
 
-The four unit tests above check individual expressions but not the dynamic
+The unit tests above check individual expressions but not the dynamic
 behaviour that emerges from their combination.  The classical benchmark for a
 soft-sphere contact model is the head-on collision of two identical grains: the
 model should return exactly the restitution coefficient $e$ that was prescribed
 as an input, and that value should be independent of the impact velocity.
 
-Two particles of radius $R=\qty{10}{\milli\metre}$ of the reference material are
-launched against each other with relative velocity $v_{\text{rel}}=2v_{0}$ and
-integrated with the same velocity-Verlet scheme until they separate.  The
-measured restitution is
+Two particles of radius $R=\qty{10}{\milli\metre}$ of the reference material,
+without gravity and \qty{0.1}{\milli\metre} apart, are launched against each
+other with relative velocity $v_{\text{rel}}=2v_{0}$ and integrated with the
+production solver until they separate.  The measured restitution is
 \begin{equation}
   e_{\text{out}}
   = \frac{\lvert v_{\text{rel}}^{\,\text{after}}\rvert}
@@ -129,7 +139,10 @@ measured restitution is
 \end{equation}
 A very small time step ($\alpha=0.02$, i.e.\ $\Delta t=T_{R}/50$) is used so
 that the integration error is negligible and only the \emph{constitutive} error
-is measured.
+is measured.  The results of this section are produced with
+\begin{verbatim}
+  python manual/scripts/collision.py
+\end{verbatim}
 
 \subsection{Results}
 
@@ -144,16 +157,16 @@ is measured.
     {$e_{\text{out}}$} & {error [\%]} &
     {$t_{c}$ [\unit{\milli\second}]} & {steps} \\
     \midrule
-    0.90 & 0.50 & 0.9022 &  0.25 & 3.172 & 131 \\
-    0.90 & 1.00 & 0.9022 &  0.25 & 2.761 & 114 \\
-    0.70 & 0.50 & 0.7185 &  2.64 & 3.269 & 135 \\
-    0.70 & 1.00 & 0.7186 &  2.66 & 2.833 & 117 \\
-    0.50 & 0.50 & 0.5505 & 10.10 & 3.390 & 140 \\
-    0.50 & 1.00 & 0.5505 & 10.11 & 2.954 & 122 \\
-    0.40 & 0.50 & 0.4721 & 18.02 & 3.487 & 144 \\
-    0.40 & 1.00 & 0.4721 & 18.03 & 3.051 & 126 \\
-    0.20 & 0.50 & 0.3246 & 62.29 & 3.802 & 157 \\
-    0.20 & 1.00 & 0.3246 & 62.29 & 3.293 & 136 \\
+    0.90 & 0.50 & 0.9021 &  0.23 & 3.148 & 130 \\
+    0.90 & 1.00 & 0.9022 &  0.24 & 2.736 & 113 \\
+    0.70 & 0.50 & 0.7181 &  2.59 & 3.245 & 134 \\
+    0.70 & 1.00 & 0.7184 &  2.62 & 2.809 & 116 \\
+    0.50 & 0.50 & 0.5499 &  9.98 & 3.390 & 140 \\
+    0.50 & 1.00 & 0.5502 & 10.04 & 2.930 & 121 \\
+    0.40 & 0.50 & 0.4715 & 17.86 & 3.487 & 144 \\
+    0.40 & 1.00 & 0.4718 & 17.94 & 3.027 & 125 \\
+    0.20 & 0.50 & 0.3239 & 61.95 & 3.778 & 156 \\
+    0.20 & 1.00 & 0.3242 & 62.08 & 3.293 & 136 \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -162,7 +175,7 @@ Table~\ref{tab:restitution} supports three conclusions.
 
 \begin{enumerate}[leftmargin=2.2em]
   \item \textbf{Velocity independence is excellent.}  Doubling the impact
-        velocity changes $e_{\text{out}}$ by less than $0.02\%$.  This is the
+        velocity changes $e_{\text{out}}$ by less than $0.1\%$.  This is the
         property that the Tsuji scaling $c_{n}\propto\sqrt{S_{n}m^{*}}$ was
         designed to deliver, and it is reproduced essentially exactly.  A model
         with a constant (velocity-independent) dashpot would show a strong
@@ -180,10 +193,10 @@ Table~\ref{tab:restitution} supports three conclusions.
   \item \textbf{Practical consequence.}  The input $e$ should be regarded as a
         \emph{damping parameter}, not as a directly measurable restitution
         coefficient.  If a specific restitution must be reproduced,
-        Table~\ref{tab:restitution} can be read backwards: to obtain a physical
-        $e\approx0.4$ one should prescribe $e\approx0.28$.  The reference
-        simulation uses $e=0.4$ as an input, which corresponds to an effective
-        restitution of about $0.47$.
+        Table~\ref{tab:restitution} can be read backwards: interpolating
+        between the rows $e=0.2$ and $e=0.4$, a physical $e\approx0.4$ requires
+        an input of about $0.3$.  The reference simulation uses $e=0.4$ as an
+        input, which corresponds to an effective restitution of about $0.47$.
 \end{enumerate}
 
 \subsection{Time-step convergence}
@@ -195,29 +208,33 @@ isolates the \emph{integration} error from the constitutive error.
 \begin{table}[htbp]
   \centering
   \caption{Convergence of the measured restitution with the time step
-  ($e=0.4$, $v_{\text{rel}}=\qty{0.5}{\metre\per\second}$).}
+  ($e=0.4$, $v_{\text{rel}}=\qty{0.5}{\metre\per\second}$).  The error is
+  relative to the finest time step.}
   \label{tab:dt-convergence}
-  \begin{tabular}{S[table-format=1.3]S[table-format=1.3e2]S[table-format=3.0]S[table-format=1.4]S[table-format=1.2]}
+  \begin{tabular}{S[table-format=1.3]S[table-format=1.3e2]S[table-format=3.0]S[table-format=1.4]S[table-format=-1.2]}
     \toprule
     {$\alpha=\Delta t/T_{R}$} & {$\Delta t$ [\unit{\second}]} &
     {steps per collision} & {$e_{\text{out}}$} & {error [\%]} \\
     \midrule
-    0.200 & 2.422e-4 &  14 & 0.4817 & 2.05 \\
-    0.100 & 1.211e-4 &  29 & 0.4744 & 0.51 \\
-    0.050 & 6.054e-5 &  58 & 0.4729 & 0.19 \\
-    0.020 & 2.422e-5 & 144 & 0.4721 & 0.02 \\
-    0.010 & 1.211e-5 & 289 & 0.4720 & {--} \\
+    0.200 & 2.422e-4 &  14 & 0.4556 & -3.36 \\
+    0.100 & 1.211e-4 &  29 & 0.4650 & -1.38 \\
+    0.050 & 6.054e-5 &  57 & 0.4705 & -0.20 \\
+    0.020 & 2.422e-5 & 144 & 0.4715 & -0.01 \\
+    0.010 & 1.211e-5 & 288 & 0.4715 & {--} \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-The measured restitution converges monotonically to $0.4720$, and the error
-falls by roughly a factor of four when $\Delta t$ is halved, consistent with the
-second-order accuracy claimed in Section~\ref{sec:integration}.  At the
-production setting $\alpha=0.2$ the integration error is only $2\%$, an order of
-magnitude smaller than the constitutive bias discussed above.  This justifies
-the choice~\eqref{eq:dt}: refining the time step further would improve the
-integration but not the physics.
+The measured restitution converges monotonically to $0.4715$.  Refining the
+time step fourfold, from $\alpha=0.2$ to $\alpha=0.05$, reduces the error from
+$3.4\%$ to $0.2\%$, a factor of \num{17}, consistent with the second-order
+accuracy claimed in Section~\ref{sec:integration}.  The individual ratios
+between successive rows are irregular because, with only a few steps per
+collision, the result also depends on where within a step the contact begins.
+At the production setting $\alpha=0.2$ the integration error is $3.4\%$, about
+five times smaller than the constitutive bias of $18\%$ discussed above.  This
+justifies the choice~\eqref{eq:dt}: refining the time step further would
+improve the integration but not the physics.
 
 \section{Reference simulation: deposition and confined compression}
 \label{sec:reference-run}
@@ -230,7 +247,17 @@ The complete experiment is run with
 \end{verbatim}
 which writes \texttt{output/simulation.gif} and
 \texttt{output/load\_displacement.png}.  The inputs are listed in
-Table~\ref{tab:refsetup}.
+Table~\ref{tab:refsetup}.  The top edge of the box is a loaded platen: it
+closes the box while it is filled and is seated on the bed when loading starts.
+The numbers and figures of this section and of Section~\ref{sec:load-level} are
+produced with
+\begin{verbatim}
+  python manual/scripts/reference.py
+\end{verbatim}
+which builds the packing with \texttt{main.build\_simulation} and the settings
+of \texttt{main.main}, and then loads two copies of it, with peak loads of
+\qty{1000}{\newton} and \qty{100}{\newton}.  The whole script runs in about
+\qty{25}{\second}.
 
 \begin{table}[htbp]
   \centering
@@ -285,79 +312,90 @@ Table~\ref{tab:refsetup}.
     \includegraphics[width=\textwidth]{figures/loading_final.png}
     \caption{end of loading}
   \end{subfigure}
-  \caption{Snapshots of the reference simulation, coloured by particle speed.
+  \caption{Snapshots of the reference simulation, coloured by particle speed,
+  at $t=\qty{0.44}{\second}$, \qty{1.35}{\second} and \qty{2.98}{\second}.
   Waves of particles are inserted near the top and rain down (a, b) until the
-  bed reaches the insertion band; the platen (red line) then compresses the
-  packing (c).  Note the deep interpenetration visible in (c), which is
-  discussed in Section~\ref{sec:load-level}.}
+  bed reaches the insertion band; the platen (red line), which closes the box
+  during filling, is then seated on the bed and compresses the packing with
+  \qty{1000}{\newton} (c).  Note the deep interpenetration visible in (c), which
+  is discussed in Section~\ref{sec:load-level}.}
   \label{fig:snapshots}
 \end{figure}
 
-Raining terminates by itself after \num{460} particles, when the bed reaches the
-insertion band.  The state at the end of the settling phase is summarised in
-Table~\ref{tab:packing}.
+Raining terminates by itself after \num{179} particles, when the bed reaches the
+insertion band, and the packing has come to rest at $t=\qty{1.88}{\second}$.  The state at the end of the settling
+phase is summarised in Table~\ref{tab:packing}.
 
 \begin{table}[htbp]
   \centering
-  \caption{Properties of the deposited packing (after settling, before loading).}
+  \caption{Properties of the deposited packing (after settling, before
+  loading).  Overlaps are normalised by the mean radius of the two particles in
+  contact; the area fraction is the particle area divided by $B$ times the bed
+  height.}
   \label{tab:packing}
   \begin{tabular}{lll}
     \toprule
     Quantity & Value & Comment \\
     \midrule
-    Number of particles $N$          & 460 & determined by the geometry \\
-    Bed height                       & \qty{0.5835}{\metre} & \num{97}\% of $L$ \\
-    Mean radius $\bar{R}$            & \qty{7.6}{\milli\metre} & input range $[4,20]$ \unit{\milli\metre} \\
-    Standard deviation of $R$        & \qty{3.2}{\milli\metre} & \\
-    Area fraction $\phi$             & 0.840 & dense random packing \\
-    Particle--particle contacts      & 843  & \\
-    Coordination number $Z$          & 3.67 & \\
-    Mean overlap $\delta_{n}/R$      & \num{3.6}\% & under self-weight only \\
-    Maximum overlap $\delta_{n}/R$   & \num{21.0}\% & deepest contact \\
-    Mean kinetic energy $\bar{E}_{k}$& \qty{1.3e-9}{\joule} & quiescence
+    Number of particles $N$          & 179 & determined by the geometry \\
+    Bed height                       & \qty{0.5840}{\metre} & \num{97}\% of $L$ \\
+    Mean radius $\bar{R}$            & \qty{12.25}{\milli\metre} & target \qty{12}{\milli\metre} \\
+    Standard deviation of $R$        & \qty{4.67}{\milli\metre} & target \qty{4.62}{\milli\metre} \\
+    Area fraction $\phi$             & 0.828 & dense random packing \\
+    Particle--particle contacts      & 318  & \\
+    Coordination number $Z$          & 3.55 & \\
+    Mean overlap $\delta_{n}/R$      & \num{2.8}\% & under self-weight only \\
+    Maximum overlap $\delta_{n}/R$   & \num{11.3}\% & deepest contact \\
+    Weight carried by the floor      & \num{78}\% & of \qty{48.5}{\newton} \\
+    Mean kinetic energy $\bar{E}_{k}$& \qty{7.1e-9}{\joule} & quiescence
                                        tolerance \qty{1e-6}{\joule} \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-Three observations deserve comment.
+Four observations deserve comment.
 
-\paragraph{The realised size distribution is not uniform.}  Although radii are
-drawn from $\mathcal{U}(\qty{4}{\milli\metre},\qty{20}{\milli\metre})$, whose
-mean is \qty{12}{\milli\metre}, the mean radius of the deposited assembly is
-only \qty{7.6}{\milli\metre}, and the histogram decreases monotonically with
-size (\num{192} particles below \qty{6}{\milli\metre} against a single one above
-\qty{18}{\milli\metre}).  The reason is the rejection sampling of
-Section~\ref{sec:deposition}: a large candidate is far more likely to overlap an
-existing grain and to exhaust its \num{30} placement attempts, so the acceptance
-probability decreases sharply with $R$.  The insertion procedure therefore
-biases the distribution.  This is harmless as long as one is aware of it, but a
-simulation that must honour a prescribed grading should either sample from the
-\emph{target} distribution and retry the same radius until it is placed, or
-insert the largest particles first.
+\paragraph{The realised size distribution matches the input.}  Radii are drawn
+from $\mathcal{U}(\qty{4}{\milli\metre},\qty{20}{\milli\metre})$, whose mean is
+\qty{12}{\milli\metre} and whose standard deviation is
+\qty{4.62}{\milli\metre}; the deposited assembly has \qty{12.25}{\milli\metre}
+and \qty{4.67}{\milli\metre}.  Each eighth of the radius range should hold
+\num{22.4} particles on average, and the assembly has \num{22} particles below
+\qty{6}{\milli\metre} and \num{26} above \qty{18}{\milli\metre}.  This is the
+result of drawing each radius once and retrying it until it is placed
+(Section~\ref{sec:deposition}): the first version of the code drew a new radius
+at every placement attempt, which favoured small grains and gave a mean radius
+of only \qty{7.6}{\milli\metre} and \num{460} particles in the same box.
 
 \paragraph{The packing is dense and well connected.}  An area fraction of
-\num{0.840} and a coordination number of \num{3.67} are typical of a
-polydisperse two-dimensional random close packing.  A value of $Z$ above the
+\num{0.828} and a coordination number of \num{3.55} are typical of a
+polydisperse two-dimensional random packing.  A value of $Z$ above the
 isostatic threshold for frictional discs ($Z=3$) confirms that the assembly is
-mechanically stable rather than marginally rigid.
+mechanically stable rather than marginally rigid.  The box is only about eight
+mean diameters wide, and the layers along a flat wall pack less densely than the
+interior, so the area fraction of a wider box would be somewhat higher.
 
 \paragraph{The overlaps are already large under self-weight.}  A mean
-$\delta_{n}/R$ of \num{3.6}\% before any external load is applied is well above
-the one per cent guideline of~\eqref{eq:overlap-criterion}.  It is a direct
-consequence of the artificial softening: the estimate~\eqref{eq:delta-static}
-with a contact force of about \qty{1}{\newton} -- the weight of the column
-carried by a bottom contact -- and $R^{*}=\bar{R}/2$ gives
-$\delta_{n}=\qty{0.27}{\milli\metre}$, i.e.\ \num{3.6}\% of $\bar{R}$, in exact
-agreement with the measurement.  The deposited packing should therefore be
-regarded as qualitatively, not quantitatively, representative; raising $E$ is
-the remedy.
+$\delta_{n}/R$ of \num{2.8}\% and a maximum of \num{11.3}\% before any external
+load is applied are well above the one per cent guideline
+of~\eqref{eq:overlap-criterion}.  It is a direct consequence of the artificial
+softening.  The floor carries \qty{37.7}{\newton} through only seven contacts,
+\qty{5.4}{\newton} each on average, and the estimate~\eqref{eq:delta-static}
+with that force and $R^{*}=\bar{R}$ gives $\delta_{n}=\qty{0.57}{\milli\metre}$,
+i.e.\ \num{4.7}\% of $\bar{R}$ at the bottom of the bed, where the contact
+forces are largest.  The deposited packing should therefore be regarded as
+qualitatively, not quantitatively, representative; raising $E$ is the remedy.
+
+\paragraph{The walls carry part of the weight.}  The floor carries only
+\num{78}\% of the weight of the particles; the remaining \num{22}\% is
+transferred to the side walls by friction.  This is the Janssen effect, and it
+is already present under self-weight in a container this slender.
 
 \subsection{Compression stage}
 
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{../output/load_displacement.png}
+  \includegraphics[width=\textwidth]{figures/load_displacement_1000N.png}
   \caption{Reference simulation, $F_{\max}=\qty{1000}{\newton}$.  Left: applied
   load $F(t)$ and contact reaction $F_{p}$ against loading time.  Right:
   reaction against platen displacement.}
@@ -366,23 +404,30 @@ the remedy.
 
 Figure~\ref{fig:loadcurve1000} shows the response.  The applied load ramps
 linearly to \qty{1000}{\newton} over \qty{0.4}{\second} and is then held for a
-further \qty{0.6}{\second}.  The contact reaction $F_{p}$ tracks $F(t)$ closely
-throughout the ramp and settles at \qty{992.7}{\newton} at the end of the hold,
-i.e.\ within \num{0.7}\% of the applied value.  This is the system-level
-consistency check announced in Section~\ref{sec:verification}: at equilibrium
-Eq.~\eqref{eq:platen-eom} requires $F_{p}=F(t)$, and the small residual measures
-how far the platen still is from static equilibrium.
+further \qty{0.6}{\second}.  The contact reaction $F_{p}$ tracks $F(t)$ closely,
+within \qty{24}{\newton} (\num{2.4}\% of the peak) during the ramp, and during
+the hold it averages \qty{999.97}{\newton} with a standard deviation of
+\qty{0.85}{\newton}; at the end it is \qty{999.98}{\newton}.  This is the
+system-level consistency check announced in Section~\ref{sec:verification}: at
+equilibrium Eq.~\eqref{eq:platen-eom} requires $F_{p}=F(t)$, and the residual
+measures how far the platen still is from static equilibrium.
 
-The final platen displacement is $u_{p}=\qty{203.8}{\milli\metre}$, i.e.\ a
-nominal axial strain of \num{35}\% of the initial bed height.  Such a strain
-cannot be produced by grain rearrangement alone in a packing that is already
-dense; it is produced by interpenetration.  Consistently with
-Table~\ref{tab:overlap}, a load of \qty{1000}{\newton} distributed over the
-handful of contacts under the platen implies overlaps of the order of half a
-radius, and the snapshot of Figure~\ref{fig:snapshots}(c) shows the grains
-visibly merging.  This case is therefore \emph{outside} the validity range of
-the Hertz--Mindlin law and is retained here as a deliberate illustration of what
+The final platen displacement is $u_{p}=\qty{131.6}{\milli\metre}$, i.e.\ a
+nominal axial strain of \num{22.5}\% of the bed height at seating,
+\qty{0.584}{\metre}.  Such a strain cannot be produced by grain rearrangement
+alone in a packing that is already dense; it is produced by interpenetration.
+The twelve particles under the platen overlap it by \num{42.5}\% of their radius
+on average and by up to \num{76}\%, and the mean particle--particle overlap has
+grown to \num{22}\%; Figure~\ref{fig:snapshots}(c) shows the grains visibly
+merging.  This case is therefore \emph{outside} the validity range of the
+Hertz--Mindlin law and is retained here as a deliberate illustration of what
 excessive loading looks like.
+
+Most of the load does not reach the floor.  Of the \qty{1048.5}{\newton} of
+applied load and weight, the floor carries \qty{458}{\newton}, \num{44}\%; the
+side walls carry the other \num{56}\% by friction.  The measured platen
+reaction is therefore a property of the packing \emph{and} of the walls, as
+anticipated in Section~\ref{sec:limitations}.
 
 \section{Effect of the load level}
 \label{sec:load-level}
@@ -390,17 +435,16 @@ excessive loading looks like.
 To quantify the previous statement, the identical packing (same seed, same
 deposition history) was compressed with a peak load of \qty{100}{\newton}
 instead of \qty{1000}{\newton}; the case is reproduced by setting
-\texttt{f\_max=100.0} in the \texttt{linear\_ramp} call of
+\texttt{amplitude=100.0} in the \texttt{Heaviside} load of
 \texttt{build\_simulation}.  The result is
 Figure~\ref{fig:loadcurve100} and Table~\ref{tab:loadlevels}.
 
 \begin{figure}[htbp]
   \centering
-  \includegraphics[width=\textwidth]{../output/load_displacement_100N.png}
+  \includegraphics[width=\textwidth]{figures/load_displacement_100N.png}
   \caption{Same packing compressed with $F_{\max}=\qty{100}{\newton}$.  The
-  reaction follows the applied ramp with a mean deviation of
-  \qty{0.02}{\newton} during the hold, and the load--displacement curve is
-  smooth and monotonic.}
+  reaction follows the applied ramp within \qty{3.6}{\newton}, and during the
+  hold its standard deviation is only \qty{0.09}{\newton}.}
   \label{fig:loadcurve100}
 \end{figure}
 
@@ -408,41 +452,44 @@ Figure~\ref{fig:loadcurve100} and Table~\ref{tab:loadlevels}.
   \centering
   \caption{Response of the same packing at two load levels.}
   \label{tab:loadlevels}
-  \begin{tabular}{lS[table-format=3.1]S[table-format=3.1]}
+  \begin{tabular}{lS[table-format=3.2]S[table-format=3.2]}
     \toprule
     Quantity & {$F_{\max}=\qty{100}{\newton}$} & {$F_{\max}=\qty{1000}{\newton}$} \\
     \midrule
-    Final platen displacement $u_{p}$ [\unit{\milli\metre}] & 34.3 & 203.8 \\
-    Nominal axial strain $u_{p}/h_{0}$ [\%]                 &  5.9 &  34.9 \\
-    Final reaction $F_{p}$ [\unit{\newton}]                 & 100.2 & 992.7 \\
-    Deviation from the applied load [\%]                    &  0.2 &   0.7 \\
-    Estimated $\delta_{n}/\bar{R}$ under the platen [\%]    & 10.6 &  49.2 \\
-    Secant stiffness $F_{\max}/u_{p}$ [\unit{\newton\per\milli\metre}] & 2.91 & 4.91 \\
+    Final platen displacement $u_{p}$ [\unit{\milli\metre}] & 26.26 & 131.59 \\
+    Nominal axial strain $u_{p}/h_{0}$ [\%]                 &  4.5  &  22.5 \\
+    Final reaction $F_{p}$ [\unit{\newton}]                 & 100.04 & 999.98 \\
+    Deviation from the applied load [\%]                    &  0.04 &  0.00 \\
+    Mean $\delta_{n}/R$ of the platen contacts [\%]         &  8.7  &  42.5 \\
+    Mean particle--particle $\delta_{n}/R$ [\%]             &  6.3  &  22.0 \\
+    Load plus weight carried by the floor [\%]              & 37.9  &  43.7 \\
+    Secant stiffness $F_{\max}/u_{p}$ [\unit{\newton\per\milli\metre}] & 3.81 & 7.60 \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-A tenfold increase of the load produces only a \num{5.9}-fold increase of the
+A tenfold increase of the load produces only a \num{5.0}-fold increase of the
 displacement, so the packing stiffens as it is compressed.  Qualitatively this
 is the expected signature of a Hertzian assembly: from~\eqref{eq:hertz} a single
 contact obeys $F\propto\delta^{3/2}$, hence a secant stiffness scaling as
 $F^{1/3}$, i.e.\ a factor $10^{1/3}=\num{2.15}$ between the two load levels.
-The measured ratio is smaller, $4.91/2.91=\num{1.69}$: the assembly is
-\emph{softer} than the elastic scaling predicts.  Two effects contribute, both
-of them consequences of overloading -- irreversible rearrangement of the
-contact network, which adds displacement that no elastic law accounts for, and
-the departure of the deeply interpenetrating contacts from the small-overlap
-regime in which~\eqref{eq:hertz} was derived.  The comparison is therefore not a
-validation of the Hertz exponent but a further indication that the
-\qty{1000}{\newton} case is over-loaded.
+The measured ratio, $7.60/3.81=\num{1.99}$, is \num{7}\% below this value.  The
+agreement should not be over-interpreted: the \qty{1000}{\newton} case is far
+outside the small-overlap regime in which~\eqref{eq:hertz} was derived, both
+cases include irreversible rearrangement of the contact network, and in both the
+side walls carry most of the load.  The comparison indicates a predominantly
+Hertzian stiffening rather than validating the exponent.  The measured overlaps
+under the platen, \num{8.7}\% and \num{42.5}\% of the radius, agree well with
+the a priori estimates of Table~\ref{tab:overlap} (\num{10.6}\% and
+\num{49.2}\%).
 
 The detailed history of the \qty{100}{\newton} case is reproduced in
-Table~\ref{tab:loadhistory}.  The reaction lags the applied load by less than
-\qty{1}{\newton} throughout the ramp, and during the hold it averages
-$\qty{100.02}{\newton}$ with a standard deviation of only
-$\qty{0.45}{\newton}$ -- a fluctuation of \num{0.45}\%.  The loading is
-therefore quasi-static in the sense that inertial effects are negligible, which
-is precisely the regime in which an oedometric test should be interpreted.
+Table~\ref{tab:loadhistory}.  The reaction stays within \qty{3.6}{\newton} of
+the applied load throughout the ramp, and during the hold
+($t\ge\qty{0.5}{\second}$) it averages $\qty{100.00}{\newton}$ with a standard
+deviation of only $\qty{0.09}{\newton}$.  The loading is therefore quasi-static
+in the sense that inertial effects are negligible, which is precisely the regime
+in which an oedometric test should be interpreted.
 
 \begin{table}[htbp]
   \centering
@@ -454,24 +501,236 @@ is precisely the regime in which an oedometric test should be interpreted.
     {$t$ [\unit{\second}]} & {$F(t)$ [\unit{\newton}]} &
     {$u_{p}$ [\unit{\milli\metre}]} & {$F_{p}$ [\unit{\newton}]} \\
     \midrule
-    0.099 &  24.72 & 12.207 &  25.75 \\
-    0.198 &  49.42 & 18.346 &  48.91 \\
-    0.302 &  75.58 & 26.214 &  74.97 \\
-    0.401 & 100.00 & 34.286 & 101.25 \\
-    0.599 & 100.00 & 34.311 &  99.93 \\
-    0.802 & 100.00 & 34.359 & 100.30 \\
-    1.000 & 100.00 & 34.348 & 100.21 \\
+    0.099 &  24.72 &  9.212 &  25.00 \\
+    0.198 &  49.42 & 14.543 &  49.96 \\
+    0.302 &  75.58 & 20.581 &  75.32 \\
+    0.401 & 100.00 & 26.124 & 100.51 \\
+    0.599 & 100.00 & 26.281 & 100.12 \\
+    0.802 & 100.00 & 26.244 &  99.91 \\
+    1.000 & 100.00 & 26.265 & 100.04 \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-The shape of the curve is also informative.  The first \qty{12}{\milli\metre} of
-displacement are produced by only a quarter of the load: the platen is placed in
-contact with the highest grain of an irregular surface and must first seat
-itself on a sufficient number of contacts.  Once the contact network under the
-platen is established the response becomes much stiffer and almost linear, with
+The shape of the curve is also informative.  The first \qty{9.2}{\milli\metre}
+of displacement, \num{35}\% of the total, are produced by only a quarter of the
+load: the platen is seated on the highest grain of an irregular surface and must
+first bear on a sufficient number of contacts.  Once the contact network under
+the platen is established the response becomes stiffer and almost linear, with
 small load drops that correspond to local rearrangements -- the discrete
-analogue of the yielding events observed in real granular assemblies.
+analogue of the yielding events observed in real granular assemblies.  After
+the ramp the displacement hardly changes: it grows by only
+\qty{0.14}{\milli\metre} during the \qty{0.6}{\second} hold.
+
+\section{Strip footing in a trapezoidal container}
+\label{sec:footing}
+
+The script \texttt{examples/footing\_on\_trapezoid.py} exercises the general
+input: a non-rectangular domain, a different boundary condition on the edges, a
+load applied to part of a side only, and a choice of load histories.  The
+container is the trapezoid with vertices $(0.05,0)$, $(0.35,0)$, $(0.40,0.25)$
+and $(0,0.25)$~\unit{\metre}, which widens upwards.  Its bottom and left side
+are rough walls and its right side is a smooth wall ($\mu_{w}=0$).  The top side
+is split into three collinear edges: the outer two are open, and the middle one,
+\qty{0.1}{\metre} wide, is a loaded platen of mass \qty{0.1}{\kilogram} that acts
+as a rigid strip footing.  The footing has self weight (\qty{0.98}{\newton}), so
+that it rests on the fill whenever the load is removed; a weightless body under
+zero load would be free, and the elastic rebound of the fill would send it away.
+\begin{verbatim}
+  vertices = [(0.05, 0.0), (0.35, 0.0), (0.40, 0.25),
+              (0.25, 0.25), (0.15, 0.25), (0.00, 0.25)]
+  footing = LoadedPlaten(load=load, mass=0.1, self_weight=True)
+  boundary_conditions = [Wall(), Wall(friction=0.0), Open(), footing,
+                         Open(), Wall()]
+  geometry = Geometry(vertices, boundary_conditions)
+\end{verbatim}
+The container is rained full with radii in $[4,8]$~\unit{\milli\metre} up to an
+insertion band at $y\in[0.19,0.20]$~\unit{\metre}, which gives \num{482}
+particles and a bed top at \qty{0.205}{\metre}; when loading starts the footing
+is lowered by \qty{44.5}{\milli\metre} onto the fill.  A command-line argument
+selects one of four load histories -- a pulse, a Heaviside step, a sinusoid, or
+a time history that loads, partly unloads and reloads -- with peaks of
+\qty{4}{\newton}.  In all four runs the settlement at the end of the
+\qty{1}{\second} loading stage is \qtyrange{5}{12}{\milli\metre}, and the final
+reaction equals the final load plus the weight of the footing to within
+\qty{0.15}{\newton}.
+
+These levels were chosen after loading the footing with a slow ramp to
+\qty{20}{\newton} over \qty{2}{\second} (Table~\ref{tab:footing}, produced with
+\texttt{python manual/scripts/footing.py}).  The settlement grows steadily to
+\qty{12}{\milli\metre} at \qty{8}{\newton} of applied load.  Between
+\qty{8}{\newton} and \qty{10}{\newton} it jumps to \qty{52}{\milli\metre}, and
+the footing punches into the fill while material flows around its ends and closes
+over it (Figure~\ref{fig:footing}); it is arrested again at about
+\qty{67}{\milli\metre}, beyond which the settlement grows by only
+\qty{2}{\milli\metre} up to \qty{18}{\newton}.  The bearing capacity is
+therefore about \qty{9}{\newton} to \qty{11}{\newton} including the weight of the
+footing, and the example loads, with the weight, stay at about half of it.  A
+capacity this low is expected from soft, frictional discs without rolling
+resistance (Section~\ref{sec:limitations}).  Being a single realisation, the
+failure load is only indicative: a different seed changes the details of the
+packing under the footing.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Settlement of the strip footing under a slow ramp of the applied
+  load to \qty{20}{\newton} over \qty{2}{\second}; the footing weight of
+  \qty{0.98}{\newton} acts in addition.}
+  \label{tab:footing}
+  \begin{tabular}{S[table-format=2.0]S[table-format=3.2]}
+    \toprule
+    {$F$ [\unit{\newton}]} & {$u_{p}$ [\unit{\milli\metre}]} \\
+    \midrule
+     1 &   4.03 \\
+     2 &   5.36 \\
+     4 &   7.74 \\
+     6 &   9.36 \\
+     8 &  12.22 \\
+    10 &  51.62 \\
+    12 &  66.71 \\
+    14 &  67.11 \\
+    16 &  67.72 \\
+    18 &  68.46 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.7\textwidth]{figures/footing_ramp_final.png}
+  \caption{Strip footing at the end of the ramp to \qty{20}{\newton}: the
+  footing has punched about \qty{70}{\milli\metre} into the fill, which has
+  closed over it.}
+  \label{fig:footing}
+\end{figure}
+
+\section{Curved indenter in a stepped container}
+\label{sec:indenter}
+
+The script \texttt{examples/curved\_indenter.py} combines a more complex domain
+with a load that does not act along a straight line.  The container
+(Figure~\ref{fig:indenter}a) has a stepped floor -- an upper level at
+$y=\qty{0.06}{\metre}$ for $x<\qty{0.12}{\metre}$ and a lower level at $y=0$ --
+whose upper corner is a re-entrant vertex, a vertical left wall, and a right
+wall inclined from $(0.30,0)$ to $(0.38,0.30)$~\unit{\metre} with a friction
+coefficient of $\mu_{w}=0.2$.  The top is open except for the indenter, a rigid
+shell whose lower surface is an arc of a circle of radius \qty{70}{\milli\metre}
+centred at $(0.19,0.34)$~\unit{\metre}; the arc cuts the top of the container
+and dips \qty{30}{\milli\metre} below it.  The arc is approximated by eight
+edges that all carry the same \texttt{LoadedPlaten}, so they form a single body
+of mass \qty{0.1}{\kilogram}, with self weight, pushed vertically:
+\begin{verbatim}
+  indenter = LoadedPlaten(load=load, mass=0.1, self_weight=True,
+                          direction=(0.0, -1.0))
+  vertices = [(0.00, 0.06), (0.12, 0.06), (0.12, 0.00), (0.30, 0.00),
+              (0.38, 0.30), *indenter_arc(), (0.00, 0.30)]
+  boundary_conditions = [Wall(), Wall(), Wall(), Wall(friction=0.2), Open(),
+                         *[indenter] * 8, Open(), Wall()]
+\end{verbatim}
+Without the explicit direction the body would move vertically as well, because
+the length-weighted normals~\eqref{eq:platen-direction} of the symmetric arc add
+up to $(0,-1)$.
+
+The container is rained full with radii in $[3,6]$~\unit{\milli\metre} up to an
+insertion band at $y\in[0.22,0.23]$~\unit{\metre}, which gives \num{850}
+particles and a bed top at \qty{0.234}{\metre}; seating lowers the indenter by
+\qty{35.8}{\milli\metre} until its lowest point touches the fill.  The results
+are produced with
+\begin{verbatim}
+  python manual/scripts/indenter.py
+\end{verbatim}
+which loads two copies of this packing.
+
+\paragraph{Capacity.}  Under a slow ramp of the applied load to
+\qty{20}{\newton} over \qty{2}{\second} (Table~\ref{tab:indenter}) the response
+is soft at first, while only the lowest part of the arc bears on the irregular
+surface: \qty{20}{\milli\metre} of settlement at \qty{1}{\newton} and
+\qty{37}{\milli\metre} at \qty{4}{\newton}, by which point the
+\qty{30}{\milli\metre} deep arc is fully embedded.  The response is then much
+stiffer, and the settlement grows by only \qty{4}{\milli\metre} up to
+\qty{8}{\newton}.  Between \qty{8}{\newton} and \qty{10}{\newton} the fill fails:
+the settlement jumps to \qty{88}{\milli\metre} at \qty{10}{\newton} and
+\qty{153}{\milli\metre} at \qty{14}{\newton}, after which the indenter, now
+buried with about \qty{8}{\centi\metre} of fill left above the lower floor, is
+arrested and moves only \qty{2}{\milli\metre} more up to \qty{20}{\newton}
+(Figure~\ref{fig:indenter-ramp}).  As for the footing, the failure load of a
+single realisation is only indicative.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Settlement of the curved indenter under a slow ramp of the applied
+  load to \qty{20}{\newton} over \qty{2}{\second}; the indenter weight of
+  \qty{0.98}{\newton} acts in addition.}
+  \label{tab:indenter}
+  \begin{tabular}{S[table-format=2.0]S[table-format=3.2]}
+    \toprule
+    {$F$ [\unit{\newton}]} & {$u_{p}$ [\unit{\milli\metre}]} \\
+    \midrule
+     1 &  20.25 \\
+     2 &  26.60 \\
+     4 &  36.77 \\
+     6 &  37.84 \\
+     8 &  40.56 \\
+    10 &  87.89 \\
+    12 & 130.94 \\
+    14 & 152.58 \\
+    16 & 153.04 \\
+    18 & 153.59 \\
+    20 & 154.26 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.7\textwidth]{figures/indenter_ramp_final.png}
+  \caption{Curved indenter at the end of the ramp to \qty{20}{\newton}.  The fill
+  has failed: the indenter has punched about \qty{0.15}{\metre} into it and the
+  fill has closed over it.}
+  \label{fig:indenter-ramp}
+\end{figure}
+
+\paragraph{Load cycle.}  The example itself applies the time history
+\texttt{TimeHistory([0, 0.4, 0.7, 1.0], [0, 4, 4, 0])}: a ramp to
+\qty{4}{\newton}, which with the weight is about half the failure load, a hold
+and a release, followed by \qty{0.2}{\second} without load
+(Figures~\ref{fig:indenter} and~\ref{fig:indenter-load}).  The indenter settles
+\qty{37}{\milli\metre} during the ramp, in a series of small collapses of the
+fill under the curved surface that show up as jumps of the reaction.  During
+the hold it does not move, and the reaction balances the load plus the weight,
+$\qty{4.98}{\newton}\pm\qty{0.05}{\newton}$.  Unloading recovers only
+\qty{2.8}{\milli\metre}; the indenter comes to rest on the fill with its
+reaction balancing its weight (\qty{0.97}{\newton} against
+\qty{0.98}{\newton}), at a permanent settlement of \qty{34}{\milli\metre}.  On
+this loose granular surface the response to a curved indenter is dominated by
+irreversible penetration.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/indenter_filled.png}
+    \caption{filled container, before loading}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/indenter_final.png}
+    \caption{after the load cycle}
+  \end{subfigure}
+  \caption{Curved indenter in the stepped container.  The red arc is the
+  indenter, a single rigid body made of eight edges; the dashed lines are open
+  edges.}
+  \label{fig:indenter}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/indenter_load.png}
+  \caption{Load cycle of the curved indenter: applied load, load plus weight and
+  reaction against time (left), and reaction against settlement (right).}
+  \label{fig:indenter-load}
+\end{figure}
 
 \section{Suggested further studies}
 \label{sec:further}
@@ -496,9 +755,10 @@ natural next steps and are directly supported by the existing interfaces.
         area fraction should decrease with $\mu$ (friction supports looser
         packings) and the compressive stiffness should increase, because wall
         friction carries a growing share of the load.
-  \item \textbf{Unloading.}  Set \texttt{hold=False} in
-        \texttt{linear\_ramp}~\eqref{eq:ramp} to release the load after the
-        ramp, and measure the irrecoverable displacement.  The area enclosed by
+  \item \textbf{Unloading.}  Replace the ramped Heaviside
+        load~\eqref{eq:ramp} by a \texttt{TimeHistory} that ramps up and back
+        down, e.g.\ \texttt{TimeHistory([0, 0.4, 0.8], [0, 1000, 0])}, and
+        measure the irrecoverable displacement.  The area enclosed by
         the loading--unloading loop is the energy dissipated by friction and by
         rearrangement, and is a far more discriminating validation target than
         the loading branch alone.
@@ -506,8 +766,9 @@ natural next steps and are directly supported by the existing interfaces.
         into a calibration curve mapping the input $e$ onto the effective
         restitution, and use it to select the input required by a given
         material.
-  \item \textbf{Wall friction and the Janssen effect.}  Compare the platen
-        reaction with the force measured on the bottom wall.  In a container as
-        slender as this one a significant fraction of the load is diverted into
-        the side walls, and the difference between the two quantifies it.
+  \item \textbf{Wall friction and the Janssen effect.}  The side walls of the
+        reference box carry \num{22}\% of the self-weight and more than half of
+        the applied load.  Repeating the loading with smooth side walls
+        (\texttt{Wall(friction=0.0)}) and with wider boxes would separate the
+        response of the packing from that of the container.
 \end{enumerate}

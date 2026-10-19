@@ -439,18 +439,82 @@ the reference simulation of Chapter~\ref{cha:examples}.
 \section{Boundary conditions}
 \label{sec:walls}
 
-\subsection{Fixed walls}
+\subsection{Polygonal domain}
+\label{sec:domain}
 
-The container is the rectangle $[0,B]\times[0,L]$ with rigid, fixed, frictional
-walls at $x=0$, $x=B$ and $y=0$.  A wall is treated as a sphere of infinite
-radius and infinite mass, so that~\eqref{eq:effective} degenerates to
+The domain is a simple polygon with vertices
+$\mathbf{p}_{0},\dots,\mathbf{p}_{M-1}$.  Edge $k$ is the segment from
+$\mathbf{a}_{k}=\mathbf{p}_{k}$ to $\mathbf{b}_{k}=\mathbf{p}_{k+1}$, the last
+edge closing the polygon back to $\mathbf{p}_{0}$, and $\mathbf{n}_{k}$ is its
+unit normal pointing into the domain.  The vertices may be given in either
+orientation; the sign of the polygon area decides on which side of each edge the
+inward normal lies.  Every edge carries one of three boundary conditions:
+\begin{description}[leftmargin=1.6em,style=nextline]
+  \item[Wall] a rigid, fixed, frictional wall.  Its friction coefficient
+        $\mu_{w}$ defaults to the material coefficient $\mu$ and may be set per
+        wall; $\mu_{w}=0$ gives a smooth wall, e.g.\ a symmetry plane.
+  \item[Open] no wall.  Particles may cross the edge; a particle whose centre
+        has left the polygon by more than an escape margin is removed from the
+        simulation (Section~\ref{sec:coupling}).
+  \item[Loaded platen] a rigid body that applies a prescribed load $F(t)$
+        (Section~\ref{sec:platen}).  Edges that carry the same platen form one
+        body.  It acts as a fixed wall until loading starts.
+\end{description}
+The container of Figure~\ref{fig:problem} is the special case $M=4$ with walls
+on the bottom and the sides and a loaded platen on top.  The location at which a
+load is applied is defined through the geometry: to load only part of a side,
+for instance with a strip footing, that side is split into collinear edges and
+only the middle one is made a loaded platen.  A load that does not act on a
+straight line, such as that of a wedge or a curved indenter, is applied through
+a body made of several edges with different orientations.
+
+\subsection{Particle--edge contact}
+
+A solid edge (wall or platen) is treated as a body of infinite radius and
+infinite mass, so that~\eqref{eq:effective} degenerates to
 \begin{equation}
   R^{*} = \lim_{R_{j}\to\infty} \frac{R_{i}R_{j}}{R_{i}+R_{j}} = R_{i},
   \qquad
   m^{*} = \lim_{m_{j}\to\infty} \frac{m_{i}m_{j}}{m_{i}+m_{j}} = m_{i}.
   \label{eq:wall-effective}
 \end{equation}
-Because the wall neither translates nor spins, the relative surface velocity
+The contact point $\mathbf{c}$ is the point of the edge closest to the particle
+centre,
+\begin{equation}
+  \mathbf{c} = \mathbf{a} + \tau\,(\mathbf{b}-\mathbf{a}),
+  \qquad
+  \tau = \min\!\left(1,\ \max\!\left(0,\
+         \frac{(\mathbf{x}_{i}-\mathbf{a})\cdot(\mathbf{b}-\mathbf{a})}
+              {\lVert\mathbf{b}-\mathbf{a}\rVert^{2}}\right)\right),
+  \label{eq:closest-point}
+\end{equation}
+and the overlap and normal follow from the distance to it,
+\begin{equation}
+  \delta_{n} = R_{i} - \lVert\mathbf{x}_{i}-\mathbf{c}\rVert,
+  \qquad
+  \mathbf{n} = \frac{\mathbf{x}_{i}-\mathbf{c}}
+                    {\lVert\mathbf{x}_{i}-\mathbf{c}\rVert}.
+  \label{eq:edge-overlap}
+\end{equation}
+For $0<\tau<1$ the normal is the edge normal and $\delta_{n}$ is the penetration
+of the particle into the edge; for $\tau\in\{0,1\}$ the particle touches an end
+vertex and the normal points from the vertex to the centre.  A centre lying
+exactly on the edge, where~\eqref{eq:edge-overlap} is undefined, is pushed along
+the inward normal $\mathbf{n}_{k}$.  Table~\ref{tab:boundaries} lists the
+resulting overlaps for the rectangular container.
+
+\paragraph{Shared vertices.}  A vertex shared by two solid edges belongs to
+both.  When the closest point of one of them to a particle is the shared vertex,
+the other edge either reports the same vertex or has a closer point of its own;
+in both cases the contact is already represented by the other edge, and the
+vertex contact is discarded.  Without this rule a particle resting on a
+re-entrant corner, or on a floor built from several collinear edges, would feel
+two contacts and settle at the overlap of half its weight.  At a convex corner
+of the domain (interior angle below \ang{180}) a particle inside the domain
+never has a vertex as its closest point, so the rule matters only at re-entrant
+corners and between collinear edges.
+
+Because a fixed wall neither translates nor spins, the relative surface velocity
 \eqref{eq:vrel} loses the $j$ terms,
 \begin{equation}
   \mathbf{v}_{iw} = \mathbf{v}_{i} - R_{i}\omega_{i}\,\mathbf{t} .
@@ -458,14 +522,16 @@ Because the wall neither translates nor spins, the relative surface velocity
 \end{equation}
 Apart from these substitutions the constitutive law of
 Section~\ref{sec:contact-summary} is applied unchanged, including the tangential
-history: walls are frictional and can therefore support shear, which is what
-produces the Janssen-like arching observed in tall containers.  The overlaps and
-outward normals are collected in Table~\ref{tab:boundaries}.
+history and the per-edge friction coefficient: walls are frictional and can
+therefore support shear, which is what produces the Janssen-like arching
+observed in tall containers.  Edges are segments, so a particle that has left
+the domain can still touch a wall from the outside.
 
 \begin{table}[htbp]
   \centering
-  \caption{Boundary geometry.  $\mathbf{n}$ points from the boundary towards the
-  particle centre.}
+  \caption{Overlaps of the rectangular container $[0,B]\times[0,L]$, the special
+  case of~\eqref{eq:edge-overlap} for contact points inside the edges.
+  $\mathbf{n}$ points from the boundary towards the particle centre.}
   \label{tab:boundaries}
   \begin{tabular}{llll}
     \toprule
@@ -474,86 +540,151 @@ outward normals are collected in Table~\ref{tab:boundaries}.
     Left wall   & $x=0$    & $(+1,0)$ & $R_{i}-x_{i}$ \\
     Right wall  & $x=B$    & $(-1,0)$ & $x_{i}+R_{i}-B$ \\
     Bottom wall & $y=0$    & $(0,+1)$ & $R_{i}-y_{i}$ \\
-    Platen      & $y=y_{p}$& $(0,-1)$ & $y_{i}+R_{i}-y_{p}$ \\
+    Top platen  & $y=y_{p}$& $(0,-1)$ & $y_{i}+R_{i}-y_{p}$ \\
     \bottomrule
   \end{tabular}
 \end{table}
 
-The top of the domain, $y=L$, is \emph{open}: nothing prevents a particle from
-leaving the box upwards during a violent collision.  In practice the deposition
-procedure of Section~\ref{sec:deposition} keeps velocities small enough for this
-never to occur.
-
-\subsection{Loading platen}
+\subsection{Loaded bodies}
 \label{sec:platen}
 
-The platen is a rigid horizontal plate of width $B$ and mass $m_{p}$ whose
-underside is at $y=y_{p}$.  It has a single degree of freedom, the vertical
-translation, and is described by the state $(y_{p},v_{p})$.  Unlike the fixed
-walls it moves, so its velocity enters the relative surface velocity of every
-particle it touches,
+A loaded body, or platen, is a rigid body of mass $m_{p}$ formed by a set
+$\mathcal{K}_{p}$ of edges: every edge that carries the same
+\texttt{LoadedPlaten} object belongs to it.  It can therefore be a single plate,
+a wedge, or a polygonal approximation of a curved surface.  The body has a
+single degree of freedom, the translation $s_{p}$ along a unit direction
+$\mathbf{d}_{p}$, so the end points of its edges are
+$\mathbf{a}_{k}+s_{p}\mathbf{d}_{p}$ and $\mathbf{b}_{k}+s_{p}\mathbf{d}_{p}$,
+$k\in\mathcal{K}_{p}$, and its state is $(s_{p},v_{p})$ with $v_{p}=\dot s_{p}$.
+The direction can be given explicitly, e.g.\ to push a curved or inclined body
+vertically; otherwise it is the length-weighted mean of the inward normals of
+the edges,
 \begin{equation}
-  \mathbf{v}_{ip} = \bigl(\mathbf{v}_{i}-v_{p}\mathbf{e}_{y}\bigr)
-                    - R_{i}\omega_{i}\,\mathbf{t},
-  \qquad
-  \mathbf{n} = (0,-1),\quad \mathbf{t} = (1,0).
+  \mathbf{d}_{p} = \frac{\sum_{k\in\mathcal{K}_{p}} L_{k}\,\mathbf{n}_{k}}
+                        {\bigl\lVert\sum_{k\in\mathcal{K}_{p}} L_{k}\,\mathbf{n}_{k}\bigr\rVert},
+  \label{eq:platen-direction}
+\end{equation}
+with $L_{k}$ the length of edge $k$.  For a single edge this is its inward
+normal; a body whose normals cancel out, such as the top and bottom of a box,
+needs an explicit direction.  Because the edges of a body move together, the
+vertices they share stay shared, and the vertex rule of
+Section~\ref{sec:walls} still applies: the tip of a wedge touches a particle
+through one contact, not two.
+
+Unlike the fixed walls the body moves, so its velocity enters the relative
+surface velocity of every particle it touches,
+\begin{equation}
+  \mathbf{v}_{ip} = \bigl(\mathbf{v}_{i}-v_{p}\mathbf{d}_{p}\bigr)
+                    - R_{i}\omega_{i}\,\mathbf{t}.
   \label{eq:vrel-platen}
 \end{equation}
 Its effective radius and mass are still those of~\eqref{eq:wall-effective}: the
-platen is rigid and its finite mass appears only in its own equation of motion,
+body is rigid and its finite mass appears only in its own equation of motion,
 not in the contact damping.
 
-Let $\mathcal{P}$ be the set of particles touching the platen.  By Newton's
-third law the vertical contact reaction on the platen is
+Let $\mathcal{P}$ be the set of particles touching any edge of the body and
+$\mathbf{F}_{ip}$ the force the body exerts on particle $i$.  By Newton's third
+law the particles push the body back with
 \begin{equation}
-  F_{p} = -\sum_{i\in\mathcal{P}} \mathbf{F}_{ip}\cdot\mathbf{e}_{y}
-        \;\ge\; 0 ,
+  F_{p} = \sum_{i\in\mathcal{P}} \mathbf{F}_{ip}\cdot\mathbf{d}_{p},
   \label{eq:platen-reaction}
 \end{equation}
-and the equation of motion of the platen reads
+which is positive when the packing resists the load.  The equation of motion of
+the body reads
 \begin{equation}
   \boxed{\;
-  m_{p}\,\dot v_{p} = F_{p} - F(t) - m_{p} g_{p},
+  m_{p}\,\dot v_{p} = F(t) - F_{p} + \chi\, m_{p}\,\mathbf{g}\cdot\mathbf{d}_{p},
   \qquad
-  \dot y_{p} = v_{p} \;}
+  \dot s_{p} = v_{p} \;}
   \label{eq:platen-eom}
 \end{equation}
-where $F(t)>0$ is the externally prescribed load pushing the platen \emph{down}
-and $g_{p}$ is an optional self-weight (set to zero by default, so that the
-platen mass acts purely as an inertial regulariser).  Equation
-\eqref{eq:platen-eom} makes the loading a \emph{force-controlled} boundary
-condition: the platen finds its own displacement as the packing resists.  In
-equilibrium $F_{p}=F(t)$, and the platen mass controls only how quickly that
-balance is reached; a heavier platen filters the high-frequency contact noise at
-the price of a slower approach to equilibrium.
+where $F(t)$ is the prescribed load, positive when it pushes the body along
+$\mathbf{d}_{p}$, and $\chi\in\{0,1\}$ switches the self-weight of the body on.
+By default $\chi=0$, so the mass acts purely as an inertial regulariser.
+Equation~\eqref{eq:platen-eom} makes the loading a \emph{force-controlled}
+boundary condition: the body finds its own displacement as the packing resists.
+In equilibrium $F_{p}=F(t)$, and the mass controls only how quickly that balance
+is reached; a heavier body filters the high-frequency contact noise at the price
+of a slower approach to equilibrium.  The edges of a body are segments, so
+particles that flow around its ends and settle behind it push it along
+$\mathbf{d}_{p}$ and reduce $F_{p}$, as they would on a thin buried plate or
+shell.
 
-The recorded platen displacement, positive downwards, is measured from the
-position $y_{p}^{0}$ at which the platen was first placed on the bed,
+\paragraph{Seating.}  So that loading starts without an impact, the body is
+first translated along $\mathbf{d}_{p}$ until one of its edges touches the first
+particle in its way.  Seen from an edge, the particle moves along
+$\mathbf{u}=-\mathbf{d}_{p}$, and the travel $s$ at which edge $k$ first touches
+particle $i$ is the smaller of two candidates.  The interior of the edge is
+touched when the distance of the centre from the line of the edge falls to the
+radius,
 \begin{equation}
-  u_{p}(t) = y_{p}^{0} - y_{p}(t).
+  s_{\text{line}} = \frac{\lvert h_{i}\rvert - R_{i}}
+                         {\lvert\mathbf{u}\cdot\boldsymbol{\nu}_{k}\rvert},
+  \qquad h_{i} = (\mathbf{x}_{i}-\mathbf{a}_{k})\cdot\boldsymbol{\nu}_{k},
+  \label{eq:seat-line}
+\end{equation}
+provided the particle approaches the line ($h_{i}\,\mathbf{u}\cdot\boldsymbol{\nu}_{k}<0$)
+and the foot of the centre then lies on the edge; $\boldsymbol{\nu}_{k}$ is a unit
+normal of the edge.  An end point $\mathbf{p}$ of the edge is touched at the
+first root of $\lVert\mathbf{w}+s\mathbf{u}\rVert=R_{i}$,
+$\mathbf{w}=\mathbf{x}_{i}-\mathbf{p}$,
+\begin{equation}
+  s_{\text{end}} = -\mathbf{w}\cdot\mathbf{u}
+     - \sqrt{(\mathbf{w}\cdot\mathbf{u})^{2}-\lVert\mathbf{w}\rVert^{2}+R_{i}^{2}} .
+  \label{eq:seat-end}
+\end{equation}
+The seating translation $s_{p}^{0}$ is the smallest non-negative candidate over
+all edges of the body and all particles.  The body is never moved backwards: if
+a particle ahead of it already overlaps one of its edges, it stays where it is.
+Seating can be switched off per body.  The recorded displacement is measured
+from the seated position,
+\begin{equation}
+  u_{p}(t) = s_{p}(t) - s_{p}^{0}.
   \label{eq:platen-disp}
 \end{equation}
+For the top platen of Figure~\ref{fig:problem}, $\mathbf{d}_{p}=(0,-1)$, so
+$s_{p}$ is the downward translation, \eqref{eq:seat-line} reduces to the gap
+between the plate and the highest particle below it, and
+\eqref{eq:platen-reaction}, \eqref{eq:platen-eom} reduce to the vertical force
+balance of a horizontal plate.  A domain may contain several bodies; they all
+start to move when loading starts and each follows its own load history.
 
 \subsection{Prescribed load history}
 
-The applied load is any user-supplied function $F(t)$.  The default is a linear
-ramp followed by a hold,
-\begin{equation}
-  F(t) =
-  \begin{cases}
-    0, & t\le 0,\\[2pt]
-    F_{\max}\,\dfrac{t}{t_{r}}, & 0<t<t_{r},\\[6pt]
-    F_{\max}, & t\ge t_{r},
-  \end{cases}
-  \label{eq:ramp}
-\end{equation}
-with an option to release the load ($F=0$ for $t\ge t_{r}$) instead of holding
-it, which allows unloading branches to be simulated.  The load clock $t$
-in~\eqref{eq:ramp} is reset when the platen is engaged, so it measures time
-since the beginning of the compression stage and not since the beginning of the
-simulation.  The ramp duration $t_{r}$ must be long compared with the
-characteristic contact time~\eqref{eq:tc}, otherwise the response is dynamic
-rather than quasi-static.
+The applied load is a function $F(t)$ of the load clock $t$, which is reset when
+the platens are released and therefore measures time since the start of loading,
+not since the start of the simulation.  Four histories are provided; any other
+function of time may be supplied directly.
+\begin{description}[leftmargin=1.6em,style=nextline]
+  \item[Pulse] a rectangular pulse of amplitude $A$ and duration $T$ starting at
+        $t_{0}$: $F=A$ for $t_{0}\le t<t_{0}+T$ and $F=0$ otherwise.
+  \item[Heaviside] a step of amplitude $A$ at $t_{0}$, optionally with a linear
+        rise of duration $t_{r}$,
+        \begin{equation}
+          F(t) =
+          \begin{cases}
+            0, & t < t_{0},\\[2pt]
+            A\,\dfrac{t-t_{0}}{t_{r}}, & t_{0}\le t<t_{0}+t_{r},\\[6pt]
+            A, & t\ge t_{0}+t_{r}.
+          \end{cases}
+          \label{eq:ramp}
+        \end{equation}
+        With $t_{r}=0$ it is a sudden step; the reference simulation uses
+        $A=F_{\max}$, $t_{0}=0$ and $t_{r}>0$, a linear ramp followed by a
+        hold.
+  \item[Sinusoidal] a harmonic history
+        $F(t)=F_{m}+A\sin\bigl(2\pi f\,(t-t_{0})+\varphi\bigr)$ for $t\ge t_{0}$
+        and zero before.  A platen cannot pull on cohesionless particles, so
+        cyclic compression needs $F_{m}\ge A$; $F_{m}=A$ with
+        $\varphi=-\pi/2$ starts smoothly from zero.
+  \item[Time history] a user-defined table $(t_{k},F_{k})$ with strictly
+        increasing $t_{k}$, interpolated linearly and held constant before the
+        first and after the last point.  Unloading and reloading branches are
+        modelled this way.
+\end{description}
+The rise time, or the time scale of any other history, must be long compared
+with the characteristic contact time~\eqref{eq:tc}, otherwise the response is
+dynamic rather than quasi-static.
 
 \section{Energy balance}
 \label{sec:energy}
@@ -591,7 +722,8 @@ sliding,
     \Bigr) \;\ge\; 0 ,
   \label{eq:dissipation}
 \end{equation}
-and enters through the work of the applied load, $\dot W = F(t)\,v_{p}^{\downarrow}$.
+and enters through the work of the applied loads, $\dot W = \sum_{p} F(t)\,v_{p}$,
+with $v_{p}$ positive into the domain.
 The monotone dissipation~\eqref{eq:dissipation} is what allows the deposition
 stage to converge to a static packing.
 

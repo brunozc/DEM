@@ -1,2 +1,17 @@
 venv/
 __pycache__/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.coverage
+
+# LaTeX build artefacts of the manual
+manual/*.aux
+manual/*.bbl
+manual/*.blg
+manual/*.fdb_latexmk
+manual/*.fls
+manual/*.log
+manual/*.out
+manual/*.toc
+manual/*.synctex.gz
