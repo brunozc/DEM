@@ -231,9 +231,33 @@ class TestDEMSimulationPhysics:
                             settings=GlobalSettings(gravity=0.0))
         sim.compress(0.4)
         platen = sim.platens[0]
-        assert_allclose(platen.normal, [-1.0, 0.0], atol=1e-15)
-        assert_allclose(platen.start[0], 0.02 - 2.0 * _static_overlap(material, 0.01, 1.0), rtol=1e-3)
+        assert_allclose(platen.direction, [-1.0, 0.0], atol=1e-15)
+        assert_allclose(platen.starts[0, 0], 0.02 - 2.0 * _static_overlap(material, 0.01, 1.0), rtol=1e-3)
         assert_allclose(platen.reaction, 1.0, rtol=1e-2)
+
+    def test_wedge_moves_rigidly_and_balances_its_load(self) -> None:
+        """A V-shaped body of two edges must move as one, touch the particle once at its tip and balance its load."""
+        material = _material()
+        load = 2.0
+        wedge = LoadedPlaten(load=Heaviside(load, rise_time=0.05), mass=0.2)
+        vertices = [(0.0, 0.0), (0.1, 0.0), (0.1, 0.1), (0.06, 0.1), (0.05, 0.08), (0.04, 0.1), (0.0, 0.1)]
+        geometry = Geometry(vertices, [Wall(), Wall(), Open(), wedge, wedge, Open(), Wall()])
+        sim = DEMSimulation(geometry, material, particles=[Particle(0.05, 0.01, 0.01)])
+        sim.rest(0.2)
+        sim.compress(0.4)
+
+        platen = sim.platens[0]
+        weight = _sphere_mass(material, 0.01) * 9.81
+        assert platen.edges == (3, 4)
+        assert_allclose(platen.direction, [0.0, -1.0], atol=1e-12)
+        assert_allclose(platen.ends[0], platen.starts[1], atol=1e-15)
+        assert_allclose(platen.reaction, load, rtol=1e-2)
+        # a double contact at the tip would halve the overlap of the top contact
+        expected = _static_overlap(material, 0.01, load) + _static_overlap(material, 0.01, load + weight) - \
+            _static_overlap(material, 0.01, weight)
+        assert_allclose(platen.displacement, expected, rtol=2e-2)
+        assert_allclose(sim.pos[0, 0], 0.05, atol=1e-9)
+        assert sim.frames[-1].platens[0].shape == (2, 2, 2)
 
     def test_rain_fills_non_rectangular_domain(self) -> None:
         """Raining must fill a trapezoid with non-overlapping particles that all stay inside it."""

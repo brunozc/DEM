@@ -148,7 +148,10 @@ platen follows its own load history: a pulse, a Heaviside step (optionally
 ramped), a sinusoid or a user-defined time history.  The location at which a
 load is applied is set by the geometry, so a strip footing is modelled by
 splitting the top side into collinear edges and loading only the middle one
-(Section~\ref{sec:walls}).
+(Section~\ref{sec:walls}).  A platen may also span several edges with different
+orientations, which then move as one rigid body, so a load can be applied
+through a wedge or a curved indenter rather than along a straight line
+(Section~\ref{sec:platen}).
 
 \section{Structure of the package}
 \label{sec:structure}
@@ -161,7 +164,7 @@ manual (Table~\ref{tab:modules}).
   \small
   \caption{Modules of \texttt{DEMcookies} and the corresponding sections.}
   \label{tab:modules}
-  \begin{tabular}{lp{4.9cm}p{4.3cm}}
+  \begin{tabular}{l>{\raggedright\arraybackslash}p{4.9cm}>{\raggedright\arraybackslash}p{4.3cm}}
     \toprule
     Module & Main contents & Documented in \\
     \midrule
@@ -173,7 +176,7 @@ manual (Table~\ref{tab:modules}).
     \texttt{geometry.py} &
       \texttt{Geometry} (polygonal domain) &
       Section~\ref{sec:domain} \\
-    \texttt{boundary.py} &
+    \texttt{boundary.py}, \texttt{segments.py} &
       \texttt{Wall}, \texttt{Open}, \texttt{LoadedPlaten}, \texttt{Platen} &
       Sections~\ref{sec:walls}--\ref{sec:platen} \\
     \texttt{loads.py} &
@@ -201,6 +204,9 @@ manual (Table~\ref{tab:modules}).
     \texttt{tests/} &
       unit and verification tests &
       Section~\ref{sec:unit-tests} \\
+    \texttt{manual/scripts/} &
+      scripts that produce the results of this manual &
+      Chapter~\ref{cha:examples} \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -238,8 +244,8 @@ mind when interpreting results.
         buoyancy, no pore pressure.
   \item \textbf{Rigid boundaries.}  Walls are perfectly rigid, straight
         segments of infinite mass and infinite radius; a platen is rigid but has
-        a finite mass and one translational degree of freedom, along the normal
-        of its edge.
+        a finite mass and one translational degree of freedom, along its
+        direction of motion.
 \end{enumerate}
 
 \section{Notation}
@@ -286,6 +292,7 @@ Table~\ref{tab:notation} collects the symbols used throughout the manual.
     $\mathbf{F}_{n},\ \mathbf{F}_{t}$ & contact force components & \unit{\newton} & \texttt{f\_n}, \texttt{f\_t} \\
     $T_{i}$          & torque on particle $i$           & \unit{\newton\metre} & \texttt{torque[i]} \\
     $s_{p},\ v_{p}$  & platen translation, velocity     & \unit{\metre}, \unit{\metre\per\second} & \texttt{platen.offset}, \texttt{.velocity} \\
+    $\mathbf{d}_{p}$ & platen direction of motion       & --                   & \texttt{platen.direction} \\
     $u_{p},\ F_{p}$  & platen displacement, reaction    & \unit{\metre}, \unit{\newton} & \texttt{platen.displacement}, \texttt{.reaction} \\
     $m_{p}$          & platen mass                      & \unit{\kilogram}     & \texttt{LoadedPlaten.mass} \\
     $F(t)$           & prescribed external load         & \unit{\newton}       & \texttt{LoadedPlaten.load} \\

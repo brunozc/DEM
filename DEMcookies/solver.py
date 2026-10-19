@@ -13,9 +13,10 @@ from typing import Callable, List, Optional, Sequence, Tuple
 import numpy as np
 import numpy.typing as npt
 
-from .boundary import LoadedPlaten, Open, Platen
+from .boundary import Open, Platen
 from .contact import HertzMindlinModel, MaterialProperties, rayleigh_time_step
-from .geometry import Geometry, project_onto_segments
+from .geometry import Geometry
+from .segments import project_onto_segments
 from .globals import ESCAPE_CHECK_INTERVAL, GEOMETRY_TOLERANCE, VERTEX_TOLERANCE, GlobalSettings
 from .neighbours import NeighbourList
 from .particle_generation import Particle
@@ -120,7 +121,8 @@ class Frame:
         positions: particle centres, shape (n, 2) [m].
         radii: particle radii [m].
         speeds: particle speeds [m/s].
-        platens: current (start, end) points of every platen, each of shape (2, 2) [m].
+        platens: current edges of every loaded body, each of shape (k, 2, 2) holding the start and end point of its
+            k edges [m].
         phase: name of the stage the frame belongs to.
     """
 
@@ -134,17 +136,17 @@ class Frame:
 
 @dataclass
 class LoadCurve:
-    """Load history recorded for one platen.
+    """Load history recorded for one loaded body.
 
     Attributes:
-        edge: index of the geometry edge of the platen.
+        edges: indices of the geometry edges of the body.
         time: time since loading started [s].
         applied: applied load [N].
-        displacement: platen translation into the domain since loading started [m].
-        reaction: contact force with which the particles push the platen back, along its outward normal [N].
+        displacement: translation of the body along its direction of motion since loading started [m].
+        reaction: contact force with which the particles push the body back, against its direction of motion [N].
     """
 
-    edge: int
+    edges: Tuple[int, ...]
     time: List[float] = field(default_factory=list)
     applied: List[float] = field(default_factory=list)
     displacement: List[float] = field(default_factory=list)
@@ -227,7 +229,7 @@ class DEMSimulation:
         self.steps_taken = 0
         self.n_removed = 0
         self.frames: List[Frame] = []
-        self.load_curves = [LoadCurve(edge=p.edge) for p in self.platens]
+        self.load_curves = [LoadCurve(edges=p.edges) for p in self.platens]
 
     @property
     def n(self) -> int:
@@ -248,14 +250,19 @@ class DEMSimulation:
         solid = [(edge, condition) for edge, condition in enumerate(conditions) if not isinstance(condition, Open)]
         solid_edges = [edge for edge, _ in solid]
         segment_of_edge = {edge: s for s, edge in enumerate(solid_edges)}
-        self.platens: List[Platen] = []
-        platen_of_segment = np.full(len(solid), -1, dtype=np.int64)
         friction = np.empty(len(solid))
         for s, (edge, condition) in enumerate(solid):
             friction[s] = self.material.friction if condition.friction is None else condition.friction
-            if isinstance(condition, LoadedPlaten):
-                platen_of_segment[s] = len(self.platens)
-                self.platens.append(Platen(edge, condition, starts[edge], ends[edge], normals[edge]))
+
+        # every loaded body moves all of its edges, which may be any subset of the solid edges
+        self.platens: List[Platen] = []
+        self.__platen_segment_groups: List[npt.NDArray[np.int64]] = []
+        platen_of_segment = np.full(len(solid), -1, dtype=np.int64)
+        for spec, edges in self.geometry.platen_groups:
+            segments = np.array([segment_of_edge[edge] for edge in edges], dtype=np.int64)
+            platen_of_segment[segments] = len(self.platens)
+            self.__platen_segment_groups.append(segments)
+            self.platens.append(Platen(edges, spec, starts[list(edges)], ends[list(edges)], normals[list(edges)]))
 
         self.__has_open_edges = len(solid) < n_edges
         self.__segment_starts = starts[solid_edges].reshape(-1, 2)
@@ -408,11 +415,11 @@ class DEMSimulation:
         starts = self.__segment_starts.copy()
         ends = self.__segment_ends.copy()
         velocities = np.zeros_like(starts)
-        for segment, platen in zip(self.__platen_segments, self.platens):
-            starts[segment] = platen.start
-            ends[segment] = platen.end
+        for segments, platen in zip(self.__platen_segment_groups, self.platens):
+            starts[segments] = platen.starts
+            ends[segments] = platen.ends
             if platen.active:
-                velocities[segment] = platen.velocity * platen.normal
+                velocities[segments] = platen.velocity * platen.direction
         return starts, ends, velocities
 
     def __redundant_vertex_contacts(self, t: npt.NDArray[np.float64], starts: npt.NDArray[np.float64],
@@ -490,10 +497,10 @@ class DEMSimulation:
             platen = self.__platen_of_segment[segment]
             on_platen = platen >= 0
             if np.any(on_platen):
-                platen_normals = np.array([p.normal for p in self.platens])
+                directions = np.array([p.direction for p in self.platens])
                 # the particles push the platen back with the opposite of the force it exerts on them
-                along_normal = np.einsum("ij,ij->i", force[on_platen], platen_normals[platen[on_platen]])
-                reactions = np.bincount(platen[on_platen], along_normal, len(self.platens))
+                along = np.einsum("ij,ij->i", force[on_platen], directions[platen[on_platen]])
+                reactions = np.bincount(platen[on_platen], along, len(self.platens))
                 for p, reaction in zip(self.platens, reactions):
                     p.reaction = float(reaction)
 
@@ -556,7 +563,7 @@ class DEMSimulation:
             phase: name of the current stage.
         """
         speeds = np.hypot(self.vel[:, 0], self.vel[:, 1])
-        platens = tuple(np.array([p.start, p.end]) for p in self.platens)
+        platens = tuple(np.stack((p.starts, p.ends), axis=1) for p in self.platens)
         self.frames.append(Frame(self.time, self.pos.copy(), self.radius.copy(), speeds, platens, phase))
 
     def __record_loads(self) -> None:

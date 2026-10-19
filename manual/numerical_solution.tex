@@ -389,8 +389,13 @@ in~\eqref{eq:cn}.  A practical rule is $m_{p}\gtrsim 10\,m_{\max}$; the
 reference case uses $m_{p}=\qty{0.5}{\kilogram}$ against
 $m_{\max}=\qty{0.084}{\kilogram}$.
 
-Until the load is applied a platen acts as a fixed wall.  The driver
-\texttt{compress} seats every platen with~\eqref{eq:platen-seat}, releases it
+The edges of a loaded body are stored with the walls as solid edges; at every
+evaluation they are shifted by $s_{p}\mathbf{d}_{p}$ and given the velocity
+$v_{p}\mathbf{d}_{p}$, and the reactions of all their contacts are summed into
+the single $F_{p}$ of their body.  Until the load is applied a body acts as a
+fixed wall.  The driver
+\texttt{compress} seats every platen
+with~\eqref{eq:seat-line}--\eqref{eq:seat-end}, releases it
 and starts the load clock \texttt{load\_time}, which is advanced only while the
 platens are active, so $F(t)$ starts from zero when loading begins,
 independently of how long the deposition took.
@@ -544,7 +549,7 @@ Two output streams are collected at user-defined intervals.
 \begin{description}[leftmargin=1.6em,style=nextline]
   \item[Frames] \texttt{Frame} records
         $\bigl(t,\ \mathbf{x}_{i},\ R_{i},\ \lVert\mathbf{v}_{i}\rVert,\
-        \text{platen end points},\ \text{phase}\bigr)$ every
+        \text{edges of the loaded bodies},\ \text{phase}\bigr)$ every
         \texttt{record\_every} steps.  Positions and radii are \emph{copied},
         not referenced, because the underlying arrays are overwritten in place
         and reallocated when particles are added or removed.  The phase label
@@ -611,7 +616,10 @@ quantitatively trustworthy only up to a few tens of newtons; beyond that the
 grains interpenetrate visibly and the computed stiffness of the packing is no
 longer that of a Hertzian assembly.  This is a limitation of the chosen
 \emph{parameters}, not of the implementation, and it is quantified further in
-Section~\ref{sec:load-level}.
+Section~\ref{sec:load-level}: in the reference run the measured mean overlap of
+the particles touching the platen is \num{8.7}\% of their radius at
+\qty{100}{\newton} and \num{42.5}\% at \qty{1000}{\newton}, close to the
+estimates of Table~\ref{tab:overlap}.
 
 \begin{table}[htbp]
   \centering
@@ -663,9 +671,11 @@ include.
         shear strength and the angle of repose.  Adding a rolling-friction
         torque is the single most valuable extension of the present model.
   \item \emph{Boundary effects}: with $B/\bar{d}\approx 8$ grain diameters
-        across, wall friction carries a significant share of the applied load
-        (Janssen effect), and the measured platen reaction is not a pure
-        material property.  A wider box or periodic lateral boundaries are
+        across, wall friction carries a large share of the load (Janssen
+        effect).  In the reference run the side walls carry \num{22}\% of the
+        self-weight and \qtyrange{56}{62}{\percent} of the load plus weight
+        under the platen (Section~\ref{sec:reference-run}), so the measured
+        platen reaction is not a pure material property.  A wider box or periodic lateral boundaries are
         required for constitutive characterisation.
   \item \emph{Two dimensions}: force chains in 2D are more percolating and the
         packing fraction is systematically higher than in 3D; results transfer

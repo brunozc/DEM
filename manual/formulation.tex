@@ -456,15 +456,17 @@ inward normal lies.  Every edge carries one of three boundary conditions:
   \item[Open] no wall.  Particles may cross the edge; a particle whose centre
         has left the polygon by more than an escape margin is removed from the
         simulation (Section~\ref{sec:coupling}).
-  \item[Loaded platen] a rigid plate on the edge that applies a prescribed load
-        $F(t)$ (Section~\ref{sec:platen}).  It acts as a fixed wall until
-        loading starts.
+  \item[Loaded platen] a rigid body that applies a prescribed load $F(t)$
+        (Section~\ref{sec:platen}).  Edges that carry the same platen form one
+        body.  It acts as a fixed wall until loading starts.
 \end{description}
 The container of Figure~\ref{fig:problem} is the special case $M=4$ with walls
 on the bottom and the sides and a loaded platen on top.  The location at which a
 load is applied is defined through the geometry: to load only part of a side,
 for instance with a strip footing, that side is split into collinear edges and
-only the middle one is made a loaded platen.
+only the middle one is made a loaded platen.  A load that does not act on a
+straight line, such as that of a wedge or a curved indenter, is applied through
+a body made of several edges with different orientations.
 
 \subsection{Particle--edge contact}
 
@@ -543,76 +545,109 @@ the domain can still touch a wall from the outside.
   \end{tabular}
 \end{table}
 
-\subsection{Loading platen}
+\subsection{Loaded bodies}
 \label{sec:platen}
 
-A loaded platen is a rigid plate of mass $m_{p}$ on edge $k$.  It has a single
-degree of freedom, the translation $s_{p}$ along the inward normal
-$\mathbf{n}_{p}=\mathbf{n}_{k}$ of its edge, so its end points are
-$\mathbf{a}_{k}+s_{p}\mathbf{n}_{p}$ and $\mathbf{b}_{k}+s_{p}\mathbf{n}_{p}$,
-and its state is $(s_{p},v_{p})$ with $v_{p}=\dot s_{p}$.  Unlike the fixed
-walls it moves, so its velocity enters the relative surface velocity of every
-particle it touches,
+A loaded body, or platen, is a rigid body of mass $m_{p}$ formed by a set
+$\mathcal{K}_{p}$ of edges: every edge that carries the same
+\texttt{LoadedPlaten} object belongs to it.  It can therefore be a single plate,
+a wedge, or a polygonal approximation of a curved surface.  The body has a
+single degree of freedom, the translation $s_{p}$ along a unit direction
+$\mathbf{d}_{p}$, so the end points of its edges are
+$\mathbf{a}_{k}+s_{p}\mathbf{d}_{p}$ and $\mathbf{b}_{k}+s_{p}\mathbf{d}_{p}$,
+$k\in\mathcal{K}_{p}$, and its state is $(s_{p},v_{p})$ with $v_{p}=\dot s_{p}$.
+The direction can be given explicitly, e.g.\ to push a curved or inclined body
+vertically; otherwise it is the length-weighted mean of the inward normals of
+the edges,
 \begin{equation}
-  \mathbf{v}_{ip} = \bigl(\mathbf{v}_{i}-v_{p}\mathbf{n}_{p}\bigr)
+  \mathbf{d}_{p} = \frac{\sum_{k\in\mathcal{K}_{p}} L_{k}\,\mathbf{n}_{k}}
+                        {\bigl\lVert\sum_{k\in\mathcal{K}_{p}} L_{k}\,\mathbf{n}_{k}\bigr\rVert},
+  \label{eq:platen-direction}
+\end{equation}
+with $L_{k}$ the length of edge $k$.  For a single edge this is its inward
+normal; a body whose normals cancel out, such as the top and bottom of a box,
+needs an explicit direction.  Because the edges of a body move together, the
+vertices they share stay shared, and the vertex rule of
+Section~\ref{sec:walls} still applies: the tip of a wedge touches a particle
+through one contact, not two.
+
+Unlike the fixed walls the body moves, so its velocity enters the relative
+surface velocity of every particle it touches,
+\begin{equation}
+  \mathbf{v}_{ip} = \bigl(\mathbf{v}_{i}-v_{p}\mathbf{d}_{p}\bigr)
                     - R_{i}\omega_{i}\,\mathbf{t}.
   \label{eq:vrel-platen}
 \end{equation}
 Its effective radius and mass are still those of~\eqref{eq:wall-effective}: the
-platen is rigid and its finite mass appears only in its own equation of motion,
+body is rigid and its finite mass appears only in its own equation of motion,
 not in the contact damping.
 
-Let $\mathcal{P}$ be the set of particles touching the platen and
-$\mathbf{F}_{ip}$ the force the platen exerts on particle $i$.  By Newton's
-third law the particles push the platen back with
+Let $\mathcal{P}$ be the set of particles touching any edge of the body and
+$\mathbf{F}_{ip}$ the force the body exerts on particle $i$.  By Newton's third
+law the particles push the body back with
 \begin{equation}
-  F_{p} = \sum_{i\in\mathcal{P}} \mathbf{F}_{ip}\cdot\mathbf{n}_{p},
+  F_{p} = \sum_{i\in\mathcal{P}} \mathbf{F}_{ip}\cdot\mathbf{d}_{p},
   \label{eq:platen-reaction}
 \end{equation}
 which is positive when the packing resists the load.  The equation of motion of
-the platen reads
+the body reads
 \begin{equation}
   \boxed{\;
-  m_{p}\,\dot v_{p} = F(t) - F_{p} + \chi\, m_{p}\,\mathbf{g}\cdot\mathbf{n}_{p},
+  m_{p}\,\dot v_{p} = F(t) - F_{p} + \chi\, m_{p}\,\mathbf{g}\cdot\mathbf{d}_{p},
   \qquad
   \dot s_{p} = v_{p} \;}
   \label{eq:platen-eom}
 \end{equation}
-where $F(t)$ is the prescribed load, positive when it pushes the platen into the
-domain, and $\chi\in\{0,1\}$ switches the self-weight of the platen on.  By
-default $\chi=0$, so the platen mass acts purely as an inertial regulariser.
+where $F(t)$ is the prescribed load, positive when it pushes the body along
+$\mathbf{d}_{p}$, and $\chi\in\{0,1\}$ switches the self-weight of the body on.
+By default $\chi=0$, so the mass acts purely as an inertial regulariser.
 Equation~\eqref{eq:platen-eom} makes the loading a \emph{force-controlled}
-boundary condition: the platen finds its own displacement as the packing
-resists.  In equilibrium $F_{p}=F(t)$, and the platen mass controls only how
-quickly that balance is reached; a heavier platen filters the high-frequency
-contact noise at the price of a slower approach to equilibrium.  Because the
-platen is a segment, particles that flow around its ends and settle behind it
-push it into the domain and reduce $F_{p}$, as they would on a thin buried
-plate.
+boundary condition: the body finds its own displacement as the packing resists.
+In equilibrium $F_{p}=F(t)$, and the mass controls only how quickly that balance
+is reached; a heavier body filters the high-frequency contact noise at the price
+of a slower approach to equilibrium.  The edges of a body are segments, so
+particles that flow around its ends and settle behind it push it along
+$\mathbf{d}_{p}$ and reduce $F_{p}$, as they would on a thin buried plate or
+shell.
 
-\paragraph{Seating.}  So that loading starts without an impact, the platen is
-first translated along its normal until it touches the first particle in front
-of it.  With $d_{i}=(\mathbf{x}_{i}-\mathbf{a}_{k})\cdot\mathbf{n}_{p}$ the
-distance of particle $i$ in front of the edge and $\ell_{i}$ its lateral distance
-beyond the plate ends (zero for particles in front of the plate itself), the
-seating translation is
+\paragraph{Seating.}  So that loading starts without an impact, the body is
+first translated along $\mathbf{d}_{p}$ until one of its edges touches the first
+particle in its way.  Seen from an edge, the particle moves along
+$\mathbf{u}=-\mathbf{d}_{p}$, and the travel $s$ at which edge $k$ first touches
+particle $i$ is the smaller of two candidates.  The interior of the edge is
+touched when the distance of the centre from the line of the edge falls to the
+radius,
 \begin{equation}
-  s_{p}^{0} = \max\!\Bigl(0,\ \min_{d_{i}>0,\ \ell_{i}<R_{i}}
-              \bigl(d_{i}-\sqrt{R_{i}^{2}-\ell_{i}^{2}}\bigr)\Bigr).
-  \label{eq:platen-seat}
+  s_{\text{line}} = \frac{\lvert h_{i}\rvert - R_{i}}
+                         {\lvert\mathbf{u}\cdot\boldsymbol{\nu}_{k}\rvert},
+  \qquad h_{i} = (\mathbf{x}_{i}-\mathbf{a}_{k})\cdot\boldsymbol{\nu}_{k},
+  \label{eq:seat-line}
 \end{equation}
-The platen is never moved backwards, so particles that already touch it keep
-their contact; seating can be switched off per platen.  The recorded platen
-displacement is measured from the seated position,
+provided the particle approaches the line ($h_{i}\,\mathbf{u}\cdot\boldsymbol{\nu}_{k}<0$)
+and the foot of the centre then lies on the edge; $\boldsymbol{\nu}_{k}$ is a unit
+normal of the edge.  An end point $\mathbf{p}$ of the edge is touched at the
+first root of $\lVert\mathbf{w}+s\mathbf{u}\rVert=R_{i}$,
+$\mathbf{w}=\mathbf{x}_{i}-\mathbf{p}$,
+\begin{equation}
+  s_{\text{end}} = -\mathbf{w}\cdot\mathbf{u}
+     - \sqrt{(\mathbf{w}\cdot\mathbf{u})^{2}-\lVert\mathbf{w}\rVert^{2}+R_{i}^{2}} .
+  \label{eq:seat-end}
+\end{equation}
+The seating translation $s_{p}^{0}$ is the smallest non-negative candidate over
+all edges of the body and all particles.  The body is never moved backwards: if
+a particle ahead of it already overlaps one of its edges, it stays where it is.
+Seating can be switched off per body.  The recorded displacement is measured
+from the seated position,
 \begin{equation}
   u_{p}(t) = s_{p}(t) - s_{p}^{0}.
   \label{eq:platen-disp}
 \end{equation}
-For the top platen of Figure~\ref{fig:problem}, $\mathbf{n}_{p}=(0,-1)$, so
-$s_{p}$ is the downward translation and~\eqref{eq:platen-reaction},
-\eqref{eq:platen-eom} reduce to the vertical force balance of a horizontal plate.
-A domain may contain several platens, on any edges; they all start to move when
-loading starts and each follows its own load history.
+For the top platen of Figure~\ref{fig:problem}, $\mathbf{d}_{p}=(0,-1)$, so
+$s_{p}$ is the downward translation, \eqref{eq:seat-line} reduces to the gap
+between the plate and the highest particle below it, and
+\eqref{eq:platen-reaction}, \eqref{eq:platen-eom} reduce to the vertical force
+balance of a horizontal plate.  A domain may contain several bodies; they all
+start to move when loading starts and each follows its own load history.
 
 \subsection{Prescribed load history}
 

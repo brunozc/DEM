@@ -66,7 +66,7 @@ def main(pause: float = 0.1, load_duration: float = 1.0) -> None:
     print("Applying the time-dependent load through the platen ...")
     sim.compress(load_duration, record_every=60)
     for platen in sim.platens:
-        print(f"  edge {platen.edge}: displacement = {platen.displacement * 1e3:.3f} mm, "
+        print(f"  edges {platen.edges}: displacement = {platen.displacement * 1e3:.3f} mm, "
               f"reaction = {platen.reaction:.2f} N")
 
     render_animation(sim, os.path.join(OUTPUT_DIR, "simulation.gif"))

@@ -1,12 +1,13 @@
 """Tests of the polygonal domain, the boundary conditions and the platen state."""
 
 import re
+from typing import Optional, Tuple
 
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
-from DEMcookies.boundary import LoadedPlaten, Open, Platen, Wall
+from DEMcookies.boundary import LoadedPlaten, Open, Platen, Wall, resolve_direction
 from DEMcookies.geometry import Geometry, project_onto_segments
 from DEMcookies.loads import Heaviside
 
@@ -81,6 +82,30 @@ class TestGeometry:
         with pytest.raises(ValueError, match=re.escape("Edges 1 and 2 fold back onto each other.")):
             Geometry([(0, 0), (2, 0), (2, 2), (2, 1), (0, 1)], [Wall()] * 5)
 
+    def test_edges_sharing_a_platen_form_one_body(self) -> None:
+        """Edges that carry the same LoadedPlaten object must be grouped into one body, in edge order."""
+        wedge = LoadedPlaten(load=Heaviside(1.0), mass=1.0)
+        vertices = [(0, 0), (1, 0), (1, 1), (0.6, 1), (0.5, 0.8), (0.4, 1), (0, 1)]
+        shape = Geometry(vertices, [Wall(), Wall(), Open(), wedge, wedge, Open(), Wall()])
+        assert len(shape.platen_groups) == 1
+        assert shape.platen_groups[0][0] is wedge
+        assert shape.platen_groups[0][1] == (3, 4)
+
+    def test_equal_but_separate_platens_are_separate_bodies(self) -> None:
+        """Two LoadedPlaten objects with equal fields must still be two bodies."""
+        left = LoadedPlaten(load=Heaviside(1.0), mass=1.0)
+        right = LoadedPlaten(load=Heaviside(1.0), mass=1.0)
+        vertices = [(0, 0), (1, 0), (1, 1), (0.6, 1), (0.4, 1), (0, 1)]
+        shape = Geometry(vertices, [Wall(), Wall(), right, Open(), left, Wall()])
+        assert [edges for _, edges in shape.platen_groups] == [(2, ), (4, )]
+
+    def test_cancelling_normals_are_rejected(self) -> None:
+        """A body on opposite sides of the domain has no default direction and must be rejected."""
+        both = LoadedPlaten(load=Heaviside(1.0), mass=1.0)
+        message = "The inward normals of the platen edges cancel out; give the LoadedPlaten an explicit direction."
+        with pytest.raises(ValueError, match=re.escape(message)):
+            Geometry.rectangle(1.0, 1.0, bottom=both, top=both)
+
     def test_non_positive_rectangle_is_rejected(self) -> None:
         """A rectangle needs a positive width and height."""
         with pytest.raises(ValueError,
@@ -95,6 +120,25 @@ class TestBoundaryConditions:
         """A wall friction coefficient cannot be negative."""
         with pytest.raises(ValueError, match=re.escape("friction must be non-negative, got -0.2.")):
             Wall(friction=-0.2)
+
+    def test_zero_platen_direction_is_rejected(self) -> None:
+        """A platen cannot move along a zero vector."""
+        with pytest.raises(ValueError, match=re.escape("direction must be a finite, non-zero (x, y) vector")):
+            LoadedPlaten(load=Heaviside(1.0), mass=1.0, direction=(0.0, 0.0))
+
+    def test_default_direction_is_length_weighted_normal(self) -> None:
+        """Without a direction, a body moves along the length-weighted mean of the inward normals of its edges."""
+        spec = LoadedPlaten(load=Heaviside(1.0), mass=1.0)
+        starts = np.array([[0.0, 0.0], [2.0, 0.0]])
+        ends = np.array([[2.0, 0.0], [2.0, 1.0]])
+        normals = np.array([[0.0, 1.0], [-1.0, 0.0]])
+        assert_allclose(resolve_direction(spec, starts, ends, normals), np.array([-1.0, 2.0]) / np.sqrt(5.0))
+
+    def test_explicit_direction_is_normalised(self) -> None:
+        """An explicit direction is used as given, scaled to unit length."""
+        spec = LoadedPlaten(load=Heaviside(1.0), mass=1.0, direction=(3.0, -4.0))
+        direction = resolve_direction(spec, np.zeros((1, 2)), np.array([[1.0, 0.0]]), np.array([[0.0, 1.0]]))
+        assert_allclose(direction, [0.6, -0.8])
 
     def test_non_positive_platen_mass_is_rejected(self) -> None:
         """A platen needs a positive mass."""
@@ -111,10 +155,10 @@ class TestPlaten:
     """Tests of the runtime platen state."""
 
     @staticmethod
-    def _top_platen() -> Platen:
+    def _top_platen(direction: Optional[Tuple[float, float]] = None, self_weight: bool = False) -> Platen:
         """Return a platen on the top edge of a unit box, facing down."""
-        spec = LoadedPlaten(load=Heaviside(2.0), mass=0.5)
-        return Platen(2, spec, np.array([1.0, 1.0]), np.array([0.0, 1.0]), np.array([0.0, -1.0]))
+        spec = LoadedPlaten(load=Heaviside(2.0), mass=0.5, direction=direction, self_weight=self_weight)
+        return Platen((2, ), spec, np.array([[1.0, 1.0]]), np.array([[0.0, 1.0]]), np.array([[0.0, -1.0]]))
 
     def test_seat_touches_highest_particle_below(self) -> None:
         """Seating must lower the plate until it touches the highest particle under it, not one beside it."""
@@ -122,8 +166,22 @@ class TestPlaten:
         positions = np.array([[0.5, 0.3], [0.2, 0.5], [1.5, 0.95]])
         radii = np.array([0.1, 0.05, 0.1])
         platen.seat(positions, radii)
-        assert_allclose(platen.start[1], 0.55)
+        assert_allclose(platen.starts[0, 1], 0.55)
         assert_allclose(platen.offset, 0.45)
+
+    def test_seat_ignores_particles_behind(self) -> None:
+        """A particle behind the plate, outside the domain, must neither block nor attract it."""
+        platen = self._top_platen()
+        platen.seat(np.array([[0.5, 1.05], [0.5, 0.3]]), np.array([0.1, 0.1]))
+        assert_allclose(platen.offset, 0.6)
+
+    def test_seat_along_oblique_direction(self) -> None:
+        """A plate moving obliquely must stop where its swept edge first touches the particle."""
+        platen = self._top_platen(direction=(0.6, -0.8))
+        platen.seat(np.array([[0.5, 0.3]]), np.array([0.1]))
+        # the line closes in at 0.8 per unit of travel, so the 0.6 gap closes after 0.75
+        assert_allclose(platen.offset, 0.75)
+        assert_allclose(platen.starts[0], [1.0 + 0.6 * 0.75, 1.0 - 0.8 * 0.75])
 
     def test_seat_never_moves_backwards(self) -> None:
         """A particle already overlapping the plate must not push it out of the domain."""
@@ -144,6 +202,5 @@ class TestPlaten:
         platen = self._top_platen()
         platen.reaction = 0.5
         assert_allclose(platen.acceleration(1.0, np.array([0.0, -9.81])), (2.0 - 0.5) / 0.5)
-        heavy = Platen(2, LoadedPlaten(load=Heaviside(2.0), mass=0.5, self_weight=True), np.array([1.0, 1.0]),
-                       np.array([0.0, 1.0]), np.array([0.0, -1.0]))
+        heavy = self._top_platen(self_weight=True)
         assert_allclose(heavy.acceleration(1.0, np.array([0.0, -9.81])), (2.0 + 0.5 * 9.81) / 0.5)

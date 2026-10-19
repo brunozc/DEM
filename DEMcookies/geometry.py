@@ -1,33 +1,13 @@
 """Polygonal simulation domain whose edges each carry a boundary condition."""
 
-from typing import Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import numpy.typing as npt
 
-from .boundary import BoundaryCondition, Open, Wall
+from .boundary import BoundaryCondition, LoadedPlaten, Open, Wall, resolve_direction
 from .globals import GEOMETRY_TOLERANCE
-
-
-def project_onto_segments(points: npt.NDArray[np.float64], starts: npt.NDArray[np.float64],
-                          ends: npt.NDArray[np.float64]) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-    """Find the point of every segment closest to every point.
-
-    Args:
-        points: points to project, shape (n, 2) [m].
-        starts: segment start points, shape (s, 2) [m].
-        ends: segment end points, shape (s, 2) [m].
-
-    Returns:
-        The segment parameters t in [0, 1] of the closest points, shape (n, s), and the vectors from the closest
-        points to the points, shape (n, s, 2) [m].
-    """
-    direction = ends - starts
-    length_sq = np.einsum("ij,ij->i", direction, direction)
-    relative = points[:, None, :] - starts[None, :, :]
-    t = np.clip(np.einsum("nsk,sk->ns", relative, direction) / length_sq, 0.0, 1.0)
-    offset = relative - t[:, :, None] * direction[None, :, :]
-    return t, offset
+from .segments import project_onto_segments
 
 
 def _cross(a: npt.NDArray[np.float64], b: npt.NDArray[np.float64]) -> float:
@@ -97,7 +77,8 @@ class Geometry:
 
     Edge ``k`` runs from vertex ``k`` to vertex ``k + 1`` (the last edge closes the polygon back to vertex 0) and
     carries ``boundary_conditions[k]``. The vertices may be given in either orientation. To apply a load to part of
-    a side only, split that side into several collinear edges and make the middle one a ``LoadedPlaten``.
+    a side only, split that side into several collinear edges and make the middle one a ``LoadedPlaten``. Edges that
+    carry the same ``LoadedPlaten`` object form one rigid body, which can have any polyline shape.
     """
 
     def __init__(self, vertices: Sequence[Sequence[float]], boundary_conditions: Sequence[BoundaryCondition]) -> None:
@@ -116,6 +97,7 @@ class Geometry:
             ValueError: if the polygon has zero area.
             ValueError: if two adjacent edges fold back onto each other.
             ValueError: if two non-adjacent edges intersect.
+            ValueError: if a loaded body without an explicit direction has edges whose inward normals cancel out.
         """
         points = np.asarray(vertices, dtype=np.float64)
         if points.ndim != 2 or points.shape[1] != 2:
@@ -152,6 +134,14 @@ class Geometry:
         orientation = 1.0 if signed_area > 0.0 else -1.0
         self.__normals = orientation * np.column_stack((-self.__tangents[:, 1], self.__tangents[:, 0]))
         self.__check_simple(GEOMETRY_TOLERANCE * size)
+
+        bodies: Dict[LoadedPlaten, List[int]] = {}
+        for k, condition in enumerate(self.__boundary_conditions):
+            if isinstance(condition, LoadedPlaten):
+                bodies.setdefault(condition, []).append(k)
+        self.__platen_groups = tuple((spec, tuple(edges)) for spec, edges in bodies.items())
+        for spec, edges in self.__platen_groups:
+            resolve_direction(spec, self.__starts[list(edges)], self.__ends[list(edges)], self.__normals[list(edges)])
 
     @classmethod
     def rectangle(cls,
@@ -222,6 +212,11 @@ class Geometry:
     def inward_normals(self) -> npt.NDArray[np.float64]:
         """Unit normal of each edge pointing into the domain, shape (n, 2)."""
         return self.__normals.copy()
+
+    @property
+    def platen_groups(self) -> Tuple[Tuple[LoadedPlaten, Tuple[int, ...]], ...]:
+        """Each loaded body with the indices of its edges, ordered by their first edge."""
+        return self.__platen_groups
 
     @property
     def area(self) -> float:

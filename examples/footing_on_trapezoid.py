@@ -5,9 +5,9 @@ smooth wall, and the top is open except for a 0.1 m strip in the middle: that st
 rigid footing. The top side is split into three collinear edges to define where the load is applied. The container
 is filled to about 0.2 m, so the footing is seated on the fill 5 cm below the rim.
 
-The loads stay at about half the bearing capacity of the footing. With this soft, rolling-prone material a slow
-ramp gives a stiffening response up to about 8 N and failure between 10 and 12 N, after which the footing punches
-into the fill.
+Together with the weight of the footing, about 1 N, the loads stay at about half the bearing capacity. With this
+soft, rolling-prone material a slow ramp gives a stiffening response up to about 8 N and failure between 8 and 10 N
+of applied load, after which the footing punches into the fill.
 
 The load history is chosen on the command line, e.g.::
 
@@ -28,15 +28,17 @@ from DEMcookies.plotting import plot_load_curves, render_animation
 
 OUTPUT_DIR = "output"
 
+RAIN = RainSettings(batch_size=25, steps_between=400, insertion_band=(0.19, 0.2), record_every=100, seed=3)
+
 LOADS: Dict[str, LoadFunction] = {
-    # 5 N for 0.2 s, starting 0.1 s after the footing is seated
-    "pulse": Pulse(amplitude=5.0, duration=0.2, start_time=0.1),
-    # sudden 5 N step at 0.1 s, held
-    "heaviside": Heaviside(amplitude=5.0, start_time=0.1),
-    # cyclic load between 0 and 5 N at 4 Hz, starting smoothly from zero
-    "sinusoidal": Sinusoidal(amplitude=2.5, frequency=4.0, mean=2.5, phase=-0.5 * math.pi),
+    # 4 N for 0.2 s, starting 0.1 s after the footing is seated
+    "pulse": Pulse(amplitude=4.0, duration=0.2, start_time=0.1),
+    # sudden 4 N step at 0.1 s, held
+    "heaviside": Heaviside(amplitude=4.0, start_time=0.1),
+    # cyclic load between 0 and 4 N at 4 Hz, starting smoothly from zero
+    "sinusoidal": Sinusoidal(amplitude=2.0, frequency=4.0, mean=2.0, phase=-0.5 * math.pi),
     # loading, partial unloading and reloading to a higher level
-    "history": TimeHistory(times=[0.0, 0.2, 0.4, 0.6], values=[0.0, 4.0, 1.0, 6.0]),
+    "history": TimeHistory(times=[0.0, 0.2, 0.4, 0.6], values=[0.0, 3.0, 1.0, 4.0]),
 }
 
 
@@ -61,7 +63,7 @@ def build_simulation(load: LoadFunction) -> DEMSimulation:
         Wall(),  # bottom
         Wall(friction=0.0),  # smooth right side
         Open(),  # top, right of the footing
-        LoadedPlaten(load=load, mass=0.3),  # footing
+        LoadedPlaten(load=load, mass=0.1, self_weight=True),  # footing, which rests on the fill under its weight
         Open(),  # top, left of the footing
         Wall(),  # rough left side
     ]
@@ -82,8 +84,7 @@ def main() -> None:
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     sim = build_simulation(LOADS[args.load])
-    rain = RainSettings(batch_size=25, steps_between=400, insertion_band=(0.19, 0.2), record_every=100, seed=3)
-    n = sim.rain_until_full(rain)
+    n = sim.rain_until_full(RAIN)
     print(f"filled with {n} particles; bed top = {sim.bed_top():.3f} m")
     sim.rest(0.1, record_every=100)
     sim.compress(args.duration, record_every=50)
