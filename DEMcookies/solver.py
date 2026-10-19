@@ -17,6 +17,7 @@ from .boundary import Open, Platen
 from .contact import HertzMindlinModel, MaterialProperties, rayleigh_time_step
 from .geometry import Geometry
 from .segments import project_onto_segments
+from .water import PoreWater, Water, evaluate_at
 from .globals import ESCAPE_CHECK_INTERVAL, GEOMETRY_TOLERANCE, VERTEX_TOLERANCE, GlobalSettings
 from .neighbours import NeighbourList
 from .particle_generation import Particle
@@ -124,6 +125,7 @@ class Frame:
         platens: current edges of every loaded body, each of shape (k, 2, 2) holding the start and end point of its
             k edges [m].
         phase: name of the stage the frame belongs to.
+        water_level: height of the free surface of the water [m], or None without water.
     """
 
     time: float
@@ -132,6 +134,7 @@ class Frame:
     speeds: npt.NDArray[np.float64]
     platens: Tuple[npt.NDArray[np.float64], ...]
     phase: str
+    water_level: Optional[float] = None
 
 
 @dataclass
@@ -158,7 +161,25 @@ class LoadCurve:
 
 
 class DEMSimulation:
-    """A 2D discrete element simulation with Hertz-Mindlin contacts in a polygonal domain."""
+    """A 2D discrete element simulation with Hertz-Mindlin contacts in a polygonal domain.
+
+    Attributes:
+        pos: particle centres, shape (n, 2) [m].
+        vel: particle velocities, shape (n, 2) [m/s].
+        omega: particle angular velocities [rad/s].
+        radius: particle radii [m].
+        force: total force on each particle at the last evaluation, apart from the drag of the water, which is
+            integrated implicitly, shape (n, 2) [N].
+        fluid_force: force of the water on each particle at the last evaluation, including the drag, shape (n, 2)
+            [N].
+        porosity: local volume porosity at each particle, computed only when there is water (NaN otherwise).
+        edge_forces: force the particles exert on each edge of the geometry, shape (edges, 2) [N].
+        platens: runtime state of every loaded body.
+        frames: recorded snapshots.
+        load_curves: recorded load history of every loaded body.
+        time: simulation time [s].
+        dt: time step [s].
+    """
 
     def __init__(self,
                  geometry: Geometry,
@@ -166,7 +187,8 @@ class DEMSimulation:
                  radius_range: Optional[Tuple[float, float]] = None,
                  particles: Optional[Sequence[Particle]] = None,
                  settings: Optional[GlobalSettings] = None,
-                 dt: Optional[float] = None) -> None:
+                 dt: Optional[float] = None,
+                 water: Optional[Water] = None) -> None:
         """Set up the simulation.
 
         Args:
@@ -176,7 +198,9 @@ class DEMSimulation:
                 initial particles.
             particles: initial particles; the domain starts empty when None.
             settings: numerical settings; defaults to ``GlobalSettings()``.
-            dt: time step [s]; defaults to a fraction of the Rayleigh time step of the smallest particle.
+            dt: time step [s]; defaults to a fraction of the Rayleigh time step of the smallest particle, or of the
+                drag relaxation time if that is shorter.
+            water: pore water; the particles are dry when None.
 
         Raises:
             ValueError: if neither a radius range nor particles are given.
@@ -184,6 +208,7 @@ class DEMSimulation:
             ValueError: if a particle radius is not positive.
             ValueError: if a particle centre lies outside the domain.
             ValueError: if the time step is not positive.
+            ValueError: if the time step is too large to resolve the drag of the water on the smallest particle.
         """
         self.geometry = geometry
         self.material = material
@@ -217,11 +242,21 @@ class DEMSimulation:
         r_max = max([self.radius_range[1]] + ([float(self.radius.max())] if self.n else []))
         if dt is not None and dt <= 0.0:
             raise ValueError(f"dt must be positive, got {dt}.")
+        self.__r_min, self.__r_max = r_min, r_max
+        self.__user_dt = dt is not None
         self.dt = dt if dt is not None else rayleigh_time_step(material, r_min, self.settings.time_step_safety)
+        self.water: Optional[Water] = None
+        self.__pore_water: Optional[PoreWater] = None
+        self.fluid_force: npt.NDArray[np.float64] = np.zeros((self.n, 2))
+        self.porosity: npt.NDArray[np.float64] = np.full(self.n, np.nan)
+        self.__drag_coefficient: npt.NDArray[np.float64] = np.zeros(self.n)
+        self.__water_velocity: npt.NDArray[np.float64] = np.zeros((self.n, 2))
+        self.set_water(water)
         self.__gravity = np.array([0.0, -self.settings.gravity])
         self.__escape_distance = self.settings.escape_margin * r_max
         self.__neighbours = NeighbourList(self.settings.neighbour_skin * r_min)
         self.__setup_boundaries()
+        self.edge_forces: npt.NDArray[np.float64] = np.zeros((geometry.n_edges, 2))
         self.__forces_valid = False
 
         self.time = 0.0
@@ -265,6 +300,7 @@ class DEMSimulation:
             self.platens.append(Platen(edges, spec, starts[list(edges)], ends[list(edges)], normals[list(edges)]))
 
         self.__has_open_edges = len(solid) < n_edges
+        self.__segment_edge = np.array(solid_edges, dtype=np.int64)
         self.__segment_starts = starts[solid_edges].reshape(-1, 2)
         self.__segment_ends = ends[solid_edges].reshape(-1, 2)
         self.__segment_normals = normals[solid_edges].reshape(-1, 2)
@@ -339,6 +375,44 @@ class DEMSimulation:
         self.__keep_particles(keep)
         self.n_removed += int(escaped.size)
 
+    def set_water(self, water: Optional[Water]) -> None:
+        """Add, change or remove the pore water, e.g. to flood a packing that was deposited dry.
+
+        The level and seepage velocity of the water are functions of the simulation time, so a change that should
+        start now can be written relative to ``sim.time``. If the drag of the new water needs a shorter time step,
+        the default time step is reduced.
+
+        Args:
+            water: new pore water; None makes the particles dry.
+
+        Raises:
+            ValueError: if the time step was given by the user and is too large to resolve the drag of the water.
+        """
+        self.water = water
+        self.__pore_water = PoreWater(water, self.geometry, self.__r_max) if water is not None else None
+        if self.__pore_water is not None:
+            # the explicit coupling to the pore pressure needs a step short compared with a pressure wave
+            water_dt = self.__pore_water.time_step_limit(self.__r_min, self.material.density)
+            if self.dt > water_dt:
+                if self.__user_dt:
+                    raise ValueError(f"dt = {self.dt:.3e} s is too large for the pore pressure coupling; "
+                                     f"use dt <= {water_dt:.3e} s.")
+                self.dt = water_dt
+        self.__forces_valid = False
+
+    def excess_pore_pressure(self, points: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Excess pore pressure, above hydrostatic, at given points; zero without coupled water.
+
+        Args:
+            points: points, shape (n, 2) [m].
+
+        Returns:
+            The excess pore pressure at each point [Pa].
+        """
+        if self.__pore_water is None:
+            return np.zeros(np.asarray(points).reshape(-1, 2).shape[0])
+        return self.__pore_water.excess_pressure(np.asarray(points, dtype=np.float64).reshape(-1, 2))
+
     # ------------------------------------------------------------------ #
     #  Force evaluation                                                  #
     # ------------------------------------------------------------------ #
@@ -356,9 +430,24 @@ class DEMSimulation:
         self.force[:] = 0.0
         self.torque[:] = 0.0
         self.force[:, 1] -= self.mass * self.settings.gravity
+        increment = self.dt if accumulate else 0.0
+        if self.__pore_water is not None and self.n:
+            fluid = self.__pore_water.forces(self.pos, self.vel, self.radius, self.time, self.settings.gravity,
+                                             increment)
+            # the drag is kept apart from the other forces and integrated implicitly in the kicks
+            self.force += fluid.force
+            self.__drag_coefficient = fluid.drag_coefficient
+            self.__water_velocity = fluid.water_velocity
+            self.fluid_force = fluid.force + fluid.drag_coefficient[:, None] * (fluid.water_velocity - self.vel)
+            self.porosity = fluid.porosity
+        else:
+            self.__drag_coefficient = np.zeros(self.n)
+            self.__water_velocity = np.zeros((self.n, 2))
+            self.fluid_force = np.zeros((self.n, 2))
+            self.porosity = np.full(self.n, np.nan)
+        self.edge_forces[:] = 0.0
         for platen in self.platens:
             platen.reaction = 0.0
-        increment = self.dt if accumulate else 0.0
         if self.n:
             self.__particle_contacts(increment)
             self.__boundary_contacts(increment)
@@ -492,6 +581,10 @@ class DEMSimulation:
         self.force[:, 1] += np.bincount(particle, force[:, 1], n)
         cross = normal[:, 0] * result.tangential_force[:, 1] - normal[:, 1] * result.tangential_force[:, 0]
         self.torque -= np.bincount(particle, radius * cross, n)
+        # the particles push each edge with the opposite of the force it exerts on them
+        segments = self.__segment_edge.size
+        self.edge_forces[self.__segment_edge, 0] = -np.bincount(segment, force[:, 0], segments)
+        self.edge_forces[self.__segment_edge, 1] = -np.bincount(segment, force[:, 1], segments)
 
         if self.platens:
             platen = self.__platen_of_segment[segment]
@@ -507,6 +600,19 @@ class DEMSimulation:
     # ------------------------------------------------------------------ #
     #  Time integration                                                  #
     # ------------------------------------------------------------------ #
+    def __kick(self, half: float) -> None:
+        """Update the particle velocities over half a time step, with the drag of the water taken implicitly.
+
+        The drag ``beta (u - v)`` is evaluated with the velocity at the end of the kick, which keeps it stable however
+        strong it is, e.g. in viscous water or for fine grains.
+
+        Args:
+            half: half the time step [s].
+        """
+        rate = half * self.inv_mass
+        pushed = self.vel + rate[:, None] * (self.force + self.__drag_coefficient[:, None] * self.__water_velocity)
+        self.vel = pushed / (1.0 + rate * self.__drag_coefficient)[:, None]
+
     def step(self) -> None:
         """Advance the whole system by one velocity-Verlet step."""
         if not self.__forces_valid:
@@ -516,7 +622,7 @@ class DEMSimulation:
         active = [p for p in self.platens if p.active]
 
         # first half kick, with the forces of the previous evaluation
-        self.vel += half * self.force * self.inv_mass[:, None]
+        self.__kick(half)
         self.omega += half * self.torque * self.inv_inertia
         for platen in active:
             platen.velocity += half * platen.acceleration(self.load_time, self.__gravity)
@@ -535,7 +641,7 @@ class DEMSimulation:
         self.__evaluate_forces(accumulate=True)
 
         # second half kick, with the new forces
-        self.vel += half * self.force * self.inv_mass[:, None]
+        self.__kick(half)
         self.omega += half * self.torque * self.inv_inertia
         for platen in active:
             platen.velocity += half * platen.acceleration(self.load_time, self.__gravity)
@@ -564,7 +670,8 @@ class DEMSimulation:
         """
         speeds = np.hypot(self.vel[:, 0], self.vel[:, 1])
         platens = tuple(np.stack((p.starts, p.ends), axis=1) for p in self.platens)
-        self.frames.append(Frame(self.time, self.pos.copy(), self.radius.copy(), speeds, platens, phase))
+        level = evaluate_at(self.water.level, self.time) if self.water is not None else None
+        self.frames.append(Frame(self.time, self.pos.copy(), self.radius.copy(), speeds, platens, phase, level))
 
     def __record_loads(self) -> None:
         """Append the current state of every platen to its load curve."""
@@ -695,12 +802,13 @@ class DEMSimulation:
         table = np.array(placed, dtype=np.float64).reshape(-1, 3)
         return table[:, :2].copy(), table[:, 2].copy(), unplaced
 
-    def rest(self, duration: float, record_every: int = 60) -> None:
-        """Let the packing relax for a given time without changing the load.
+    def rest(self, duration: float, record_every: int = 60, phase: str = "settling") -> None:
+        """Advance the simulation for a given time without changing the load, e.g. to let the packing relax.
 
         Args:
             duration: time to simulate [s].
             record_every: number of time steps between two recorded frames.
+            phase: name of the stage, stored with the recorded frames.
 
         Raises:
             ValueError: if the duration is negative.
@@ -711,7 +819,7 @@ class DEMSimulation:
         for s in range(steps):
             self.step()
             if s % record_every == 0:
-                self.__record_frame("settling")
+                self.__record_frame(phase)
 
     def compress(self, duration: float, record_every: int = 40) -> None:
         """Apply the loads of the loaded platens for a given time.

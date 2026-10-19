@@ -26,6 +26,40 @@ HALF_STENCIL_OFFSETS: Tuple[Tuple[int, int], ...] = ((0, 0), (1, 0), (-1, 1), (0
 # Bit shift used to pack a particle pair (i, j) into the single integer key (i << shift) | j.
 PAIR_KEY_SHIFT = 32
 
+# Smallest volume porosity used by the drag law. Overlapping particles can make the computed porosity of a dense
+# packing unphysically small, and the drag grows without bound as the porosity tends to zero.
+MIN_POROSITY = 0.2
+
+# Number of samples per cell side used to measure the area of the domain around each node of the porosity grid.
+POROSITY_SAMPLES_PER_CELL = 8
+
+# Largest porosity used for the permeability and for the pore pressure force, which both diverge as the solid vanishes.
+MAX_POROSITY = 0.95
+
+# Solid volume fractions between which the skeleton carries the water in its pores along: completely above the dense
+# value, where the water is trapped in the pores, and not at all below the dilute value, where it flows past the
+# particles of a suspension.
+CARRIED_SOLID_FRACTION_DENSE = 0.5
+CARRIED_SOLID_FRACTION_DILUTE = 0.2
+
+# Constant c of the permeability k = c R^2 eps^4.7 / (1 - eps) that the drag law implies at low Reynolds number,
+# c = 4 / (3 * 5.76), with 5.76 = 4.8^2 / 4 from the Stokes limit of the drag coefficient.
+PERMEABILITY_CONSTANT = 4.0 / (3.0 * 5.76)
+
+# Smallest domain area of a grid node, as a fraction of the cell area, for the node to carry a pore pressure.
+ACTIVE_NODE_FRACTION = 1.0e-3
+
+# Relative residual at which the conjugate gradient solver of the pore pressure stops, and its iteration budget as a
+# multiple of the number of unknowns (in exact arithmetic it converges within that number).
+PRESSURE_SOLVER_TOLERANCE = 1.0e-10
+PRESSURE_SOLVER_ITERATIONS = 10
+
+# Largest time step as a fraction of the time an undrained pressure wave needs to cross a grid cell.
+COUPLING_TIME_STEP_FRACTION = 0.5
+
+# Porosity of a dense packing, at which the pore pressure resists a collective motion of the skeleton most quickly.
+DENSE_POROSITY = 0.35
+
 # Number of time steps between two searches for particles that left through an open edge. A particle that has left
 # interacts with nothing, so removing it a few steps late is harmless and saves a polygon test every step.
 ESCAPE_CHECK_INTERVAL = 50

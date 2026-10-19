@@ -151,7 +151,13 @@ splitting the top side into collinear edges and loading only the middle one
 (Section~\ref{sec:walls}).  A platen may also span several edges with different
 orientations, which then move as one rigid body, so a load can be applied
 through a wedge or a curved indenter rather than along a straight line
-(Section~\ref{sec:platen}).
+(Section~\ref{sec:platen}).  Finally, the particles can be immersed in water
+below a water table, which may rise or fall with time, and an upward or
+downward seepage flow can be imposed through them.  The water acts on the
+particles through buoyancy and porosity-dependent drag, and, if requested, an
+excess pore pressure that builds up under fast loading and dissipates by flow,
+so that undrained loading and consolidation can be studied
+(Section~\ref{sec:water}).
 
 \section{Structure of the package}
 \label{sec:structure}
@@ -186,6 +192,9 @@ manual (Table~\ref{tab:modules}).
     \texttt{neighbours.py} &
       cell grid, \texttt{NeighbourList} &
       Section~\ref{sec:broadphase} \\
+    \texttt{water.py} &
+      \texttt{Water}, buoyancy, drag, porosity grid, pore pressure &
+      Sections~\ref{sec:water} and~\ref{sec:water-numerics} \\
     \texttt{particle\_generation.py} &
       \texttt{Particle}, \texttt{generate\_lattice\_particles} &
       Section~\ref{sec:deposition} \\
@@ -240,8 +249,13 @@ mind when interpreting results.
   \item \textbf{No cohesion, no rolling resistance.}  Contacts transmit only
         compression, viscous damping and Coulomb friction.  Adhesive forces,
         liquid bridges, rolling friction and particle breakage are not modelled.
-  \item \textbf{Dry system.}  There is no interstitial fluid: no drag, no
-        buoyancy, no pore pressure.
+  \item \textbf{Dry or saturated system.}  By default there is no interstitial
+        fluid.  Optionally the particles are immersed in water below a water
+        table.  The water is either drained -- its pressure is hydrostatic and
+        any flow is prescribed -- or coupled, with an excess pore pressure that
+        follows a Biot storage equation with Darcy flow on a coarse grid.  The
+        fluid itself is not resolved: it has no inertia and no viscous stresses
+        of its own (Section~\ref{sec:water}).
   \item \textbf{Rigid boundaries.}  Walls are perfectly rigid, straight
         segments of infinite mass and infinite radius; a platen is rigid but has
         a finite mass and one translational degree of freedom, along its
@@ -298,6 +312,12 @@ Table~\ref{tab:notation} collects the symbols used throughout the manual.
     $F(t)$           & prescribed external load         & \unit{\newton}       & \texttt{LoadedPlaten.load} \\
     $\Delta t$       & time step                        & \unit{\second}       & \texttt{sim.dt} \\
     $T_{R}$          & Rayleigh critical time step      & \unit{\second}       & \texttt{rayleigh\_time\_step} \\
+    $y_{w}$          & water table height               & \unit{\metre}        & \texttt{Water.level} \\
+    $\rho_{w},\ \mu_{w}$ & water density and viscosity  & \unit{\kilogram\per\cubic\metre}, \unit{\pascal\second} & \texttt{density}, \texttt{viscosity} \\
+    $U$              & superficial seepage velocity     & \unit{\metre\per\second} & \texttt{seepage\_velocity} \\
+    $\varepsilon$    & local volume porosity            & --                   & \texttt{sim.porosity} \\
+    $p$              & excess pore pressure             & \unit{\pascal}       & \texttt{excess\_pore\_pressure} \\
+    $K_{w},\ k$      & water bulk modulus, permeability & \unit{\pascal}, \unit{\metre\squared} & \texttt{bulk\_modulus}, \texttt{permeability} \\
     \bottomrule
   \end{tabular}
 \end{table}

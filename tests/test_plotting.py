@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from DEMcookies import DEMSimulation, Geometry, Heaviside, LoadedPlaten, MaterialProperties, Particle
+from DEMcookies import DEMSimulation, Geometry, Heaviside, LoadedPlaten, MaterialProperties, Particle, Water
 from DEMcookies.plotting import plot_load_curves, render_animation, render_frame
 
 MATERIAL = MaterialProperties(density=2500.0, youngs_modulus=5.0e6, poisson_ratio=0.25, restitution=0.1, friction=0.5)
@@ -31,6 +31,16 @@ class TestPlotting:
         plot_load_curves(sim, str(tmp_path / "curves.png"))
         for name in ("run.gif", "last.png", "curves.png"):
             assert (tmp_path / name).stat().st_size > 0
+
+    def test_snapshot_with_water_is_written(self, tmp_path: Path) -> None:
+        """A snapshot of a simulation with water must be written, with the water drawn below its level."""
+        sim = DEMSimulation(Geometry.rectangle(0.05, 0.05),
+                            MATERIAL,
+                            particles=[Particle(0.025, 0.01, 0.01)],
+                            water=Water(level=0.03))
+        sim.rest(0.01, record_every=10)
+        render_frame(sim, str(tmp_path / "wet.png"))
+        assert (tmp_path / "wet.png").stat().st_size > 0
 
     def test_load_curves_of_heavy_platen_are_written(self, tmp_path: Path) -> None:
         """The load curves of a platen with self weight, which add the weight line, must be written."""
