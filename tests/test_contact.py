@@ -8,16 +8,17 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
-from DEMcookies.contact import ContactForces, HertzMindlinModel, MaterialProperties, rayleigh_time_step
+from DEMcookies.contact import ContactForces, HertzMindlinModel, MaterialProperties, RollingMoments, rayleigh_time_step
 
 
-def _material(restitution: float = 1.0, friction: float = 0.5) -> MaterialProperties:
-    """Return the reference material with the given restitution and friction."""
+def _material(restitution: float = 1.0, friction: float = 0.5, rolling_friction: float = 0.0) -> MaterialProperties:
+    """Return the reference material with the given restitution, friction and rolling friction."""
     return MaterialProperties(density=2500.0,
                               youngs_modulus=5.0e6,
                               poisson_ratio=0.25,
                               restitution=restitution,
-                              friction=friction)
+                              friction=friction,
+                              rolling_friction=rolling_friction)
 
 
 def _single(model: HertzMindlinModel,
@@ -28,6 +29,17 @@ def _single(model: HertzMindlinModel,
     """Evaluate one contact between two 10 mm particles with unit effective mass."""
     return model.evaluate(np.array([normal], dtype=float), np.array([overlap]), np.array([velocity], dtype=float),
                           np.zeros((1, 2)), dt, np.array([0.005]), np.array([1.0]))
+
+
+def _rolling(model: HertzMindlinModel,
+             overlap: float,
+             spin: float,
+             stored: float,
+             dt: float = 1.0e-5) -> Tuple[ContactForces, RollingMoments]:
+    """Evaluate the forces and the rolling moment of one contact between two 10 mm particles at rest."""
+    contact = _single(model, (0.0, 1.0), overlap, (0.0, 0.0), dt)
+    moments = model.rolling(contact, np.array([spin]), np.array([stored]), dt, np.array([0.005]), np.array([1.0e-6]))
+    return contact, moments
 
 
 class TestMaterialProperties:
@@ -43,6 +55,7 @@ class TestMaterialProperties:
         ("poisson_ratio", 0.5, "poisson_ratio must be in (-1, 0.5), got 0.5."),
         ("restitution", 1.5, "restitution must be in [0, 1], got 1.5."),
         ("friction", -0.1, "friction must be non-negative, got -0.1."),
+        ("rolling_friction", -0.2, "rolling_friction must be non-negative, got -0.2."),
     ])
     def test_invalid_values_are_rejected(self, field: str, value: float, message: str) -> None:
         """Unphysical material parameters must be rejected with a specific message."""
@@ -158,3 +171,46 @@ class TestHertzMindlinModel:
                                     radius[k:k + 1], mass[k:k + 1])
             assert_allclose(batch.force[k], single.force[0], rtol=1e-12, atol=1e-18)
             assert_allclose(batch.tangential_spring[k], single.tangential_spring[0], rtol=1e-12, atol=1e-22)
+
+
+class TestRollingResistance:
+    """Tests of the rolling resistance of HertzMindlinModel."""
+
+    def test_elastic_moment_follows_rolling_spring(self) -> None:
+        """Below the limit, an undamped contact must resist a stored rotation with k_r = 2.25 mu_r^2 R*^2 S_n."""
+        model = HertzMindlinModel(_material(restitution=1.0, rolling_friction=0.3))
+        contact, moments = _rolling(model, 1.0e-4, 0.0, 1.0e-4)
+        stiffness = 2.25 * 0.3**2 * 0.005**2 * contact.normal_stiffness[0]
+        assert_allclose(moments.moment, [-stiffness * 1.0e-4], rtol=1e-12)
+        assert abs(moments.moment[0]) < 0.3 * 0.005 * contact.normal_force[0]
+        assert_allclose(moments.rolling_spring, [1.0e-4], rtol=1e-12)
+
+    def test_moment_is_capped(self) -> None:
+        """A fast relative rotation must mobilise the full rolling moment mu_r R* F_n against it."""
+        model = HertzMindlinModel(_material(restitution=0.4, rolling_friction=0.3))
+        contact, moments = _rolling(model, 1.0e-4, 50.0, 0.0)
+        limit = 0.3 * 0.005 * contact.normal_force[0]
+        assert_allclose(moments.moment, [-limit], rtol=1e-12)
+        # the spring is reset to the capped moment, so a reversal unloads elastically
+        stiffness = 2.25 * 0.3**2 * 0.005**2 * contact.normal_stiffness[0]
+        assert_allclose(moments.rolling_spring, [limit / stiffness], rtol=1e-12)
+
+    def test_zero_rolling_friction_gives_no_moment(self) -> None:
+        """Without rolling friction, a spinning contact must feel no moment and keep no history."""
+        model = HertzMindlinModel(_material(restitution=0.4))
+        _, moments = _rolling(model, 1.0e-4, 50.0, 1.0e-3)
+        assert_allclose(moments.moment, [0.0], atol=1e-30)
+        assert_allclose(moments.rolling_spring, [0.0], atol=1e-30)
+
+    def test_open_contact_has_no_moment_and_no_history(self) -> None:
+        """A contact that opened must exert no moment and reset its rolling spring."""
+        model = HertzMindlinModel(_material(restitution=0.4, rolling_friction=0.3))
+        _, moments = _rolling(model, -1.0e-5, 50.0, 1.0e-3)
+        assert_allclose(moments.moment, [0.0], atol=1e-30)
+        assert_allclose(moments.rolling_spring, [0.0], atol=1e-30)
+
+    def test_zero_time_step_does_not_advance_history(self) -> None:
+        """A zero time step must leave the stored rotation unchanged however fast the contact spins."""
+        model = HertzMindlinModel(_material(restitution=0.4, rolling_friction=0.3))
+        _, moments = _rolling(model, 1.0e-4, 1.0e-3, 2.0e-5, dt=0.0)
+        assert_allclose(moments.rolling_spring, [2.0e-5], rtol=1e-12)

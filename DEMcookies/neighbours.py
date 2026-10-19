@@ -1,8 +1,8 @@
 """Broad-phase contact detection: a uniform cell grid feeding a Verlet neighbour list.
 
 The cell grid finds every pair of particles whose surfaces are closer than a skin distance. The neighbour list keeps
-those candidate pairs, together with the tangential spring of each pair, until some particle has moved more than
-half the skin. Until then no pair outside the list can have come into contact, so the list can be reused.
+those candidate pairs, together with the tangential and rolling springs of each pair, until some particle has moved
+more than half the skin. Until then no pair outside the list can have come into contact, so the list can be reused.
 """
 
 from typing import Tuple
@@ -96,7 +96,7 @@ def find_close_pairs(positions: npt.NDArray[np.float64], radii: npt.NDArray[np.f
 
 
 class NeighbourList:
-    """Verlet list of candidate particle pairs, together with the tangential spring of each pair."""
+    """Verlet list of candidate particle pairs, together with the tangential and rolling springs of each pair."""
 
     def __init__(self, skin: float) -> None:
         """Create an empty list.
@@ -113,6 +113,7 @@ class NeighbourList:
         self.first: npt.NDArray[np.int64] = np.zeros(0, dtype=np.int64)
         self.second: npt.NDArray[np.int64] = np.zeros(0, dtype=np.int64)
         self.spring: npt.NDArray[np.float64] = np.zeros((0, 2))
+        self.rolling: npt.NDArray[np.float64] = np.zeros(0)
         self.builds = 0
         self.__reference: npt.NDArray[np.float64] = np.zeros((0, 2))
         self.__valid = False
@@ -148,6 +149,7 @@ class NeighbourList:
         self.first = new_index[self.first[retained]].astype(np.int64)
         self.second = new_index[self.second[retained]].astype(np.int64)
         self.spring = self.spring[retained]
+        self.rolling = self.rolling[retained]
         self.__valid = False
 
     def __rebuild(self, positions: npt.NDArray[np.float64], radii: npt.NDArray[np.float64]) -> None:
@@ -159,15 +161,18 @@ class NeighbourList:
         """
         first, second = find_close_pairs(positions, radii, self.skin)
         spring = np.zeros((first.size, 2))
+        rolling = np.zeros(first.size)
         if self.first.size and first.size:
             old_keys = pair_keys(self.first, self.second)
             new_keys = pair_keys(first, second)
             index = np.minimum(np.searchsorted(old_keys, new_keys), old_keys.size - 1)
             found = old_keys[index] == new_keys
             spring[found] = self.spring[index[found]]
+            rolling[found] = self.rolling[index[found]]
         self.first = first
         self.second = second
         self.spring = spring
+        self.rolling = rolling
         self.builds += 1
         self.__reference = positions.copy()
         self.__valid = True

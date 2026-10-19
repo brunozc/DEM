@@ -3,10 +3,12 @@
 import re
 from pathlib import Path
 
+import numpy as np
 import pytest
+from numpy.testing import assert_allclose
 
 from DEMcookies import DEMSimulation, Geometry, Heaviside, LoadedPlaten, MaterialProperties, Particle, Water
-from DEMcookies.plotting import plot_load_curves, render_animation, render_frame
+from DEMcookies.plotting import _clip_below, _current_outline, plot_load_curves, render_animation, render_frame
 
 MATERIAL = MaterialProperties(density=2500.0, youngs_modulus=5.0e6, poisson_ratio=0.25, restitution=0.1, friction=0.5)
 
@@ -41,6 +43,19 @@ class TestPlotting:
         sim.rest(0.01, record_every=10)
         render_frame(sim, str(tmp_path / "wet.png"))
         assert (tmp_path / "wet.png").stat().st_size > 0
+
+    def test_water_stops_at_lowered_platen(self) -> None:
+        """The water drawn below a level above a lowered platen must end at the platen, not at the original edge."""
+        sim = _loaded_simulation()
+        platen = sim.platens[0]
+        assert platen.offset > 0.0
+        recorded = sim.frames[-1].platens
+        outline = _current_outline(sim.geometry.vertices, [platen.edges], recorded)
+        wet = _clip_below(outline, 0.06)
+        assert_allclose(wet[:, 1].max(), recorded[0][0, 0, 1], atol=1e-12)
+        assert wet[:, 1].max() < 0.05 - 1.0e-6
+        # the vertices of the fixed edges stay where they were defined
+        assert_allclose(np.sort(wet[:, 1])[:2], [0.0, 0.0], atol=1e-15)
 
     def test_load_curves_of_heavy_platen_are_written(self, tmp_path: Path) -> None:
         """The load curves of a platen with self weight, which add the weight line, must be written."""

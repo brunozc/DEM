@@ -246,9 +246,11 @@ mind when interpreting results.
         elastic solution.  It is quantitatively valid only while the overlap
         remains a small fraction of the particle radius
         (Section~\ref{sec:limitations}).
-  \item \textbf{No cohesion, no rolling resistance.}  Contacts transmit only
-        compression, viscous damping and Coulomb friction.  Adhesive forces,
-        liquid bridges, rolling friction and particle breakage are not modelled.
+  \item \textbf{No cohesion.}  Contacts transmit only compression, viscous
+        damping, Coulomb friction and, optionally, a rolling resistance moment
+        that stands in for the angular shape of real
+        grains~(Section~\ref{sec:rolling}).  Adhesive forces, liquid bridges and
+        particle breakage are not modelled.
   \item \textbf{Dry or saturated system.}  By default there is no interstitial
         fluid.  Optionally the particles are immersed in water below a water
         table.  The water is either drained -- its pressure is hydrostatic and

@@ -54,17 +54,19 @@ class TestNeighbourList:
     """Tests of NeighbourList."""
 
     def test_springs_survive_rebuild(self) -> None:
-        """A rebuild must carry the tangential spring of a pair that is still in the list."""
+        """A rebuild must carry the tangential and rolling springs of a pair that is still in the list."""
         positions = np.array([[0.0, 0.0], [0.019, 0.0], [0.5, 0.5]])
         radii = np.full(3, 0.01)
         neighbours = NeighbourList(skin=0.002)
         neighbours.update(positions, radii)
         assert neighbours.first.tolist() == [0] and neighbours.second.tolist() == [1]
         neighbours.spring[0] = [1.0e-6, 2.0e-6]
+        neighbours.rolling[0] = 3.0e-4
         moved = positions + np.array([[0.0, 0.0], [0.0, 0.0], [0.0, 0.01]])
         neighbours.update(moved, radii)
         assert neighbours.builds == 2
         assert_allclose(neighbours.spring, [[1.0e-6, 2.0e-6]])
+        assert_allclose(neighbours.rolling, [3.0e-4])
 
     def test_small_motion_reuses_list(self) -> None:
         """Motion of less than half the skin must not trigger a rebuild."""
@@ -80,9 +82,11 @@ class TestNeighbourList:
         neighbours = NeighbourList(skin=0.002)
         neighbours.update(positions, np.full(3, 0.01))
         neighbours.spring[:] = [[1.0, 0.0], [2.0, 0.0]]
+        neighbours.rolling[:] = [0.1, 0.2]
         neighbours.remove_particles(np.array([False, True, True]))
         assert neighbours.first.tolist() == [0] and neighbours.second.tolist() == [1]
         assert_allclose(neighbours.spring, [[2.0, 0.0]])
+        assert_allclose(neighbours.rolling, [0.2])
 
     def test_negative_skin_is_rejected(self) -> None:
         """A negative skin must be rejected."""

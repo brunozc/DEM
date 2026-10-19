@@ -13,13 +13,28 @@ from DEMcookies import (DEMSimulation, Geometry, GlobalSettings, Heaviside, Load
 from DEMcookies.solver import VelocityVerlet
 
 
-def _material(restitution: float = 0.1, friction: float = 0.5) -> MaterialProperties:
+def _material(restitution: float = 0.1, friction: float = 0.5, rolling_friction: float = 0.0) -> MaterialProperties:
     """Return the reference material, heavily damped by default so that tests settle quickly."""
     return MaterialProperties(density=2500.0,
                               youngs_modulus=5.0e6,
                               poisson_ratio=0.25,
                               restitution=restitution,
-                              friction=friction)
+                              friction=friction,
+                              rolling_friction=rolling_friction)
+
+
+def _sphere_on_incline(slope: float, rolling_friction: float) -> DEMSimulation:
+    """Return a 10 mm particle resting on the middle of a 0.4 m long incline of the given gradient tan(theta)."""
+    material = _material(friction=0.8, rolling_friction=rolling_friction)
+    length, radius = 0.4, 0.01
+    rise = slope * length
+    geometry = Geometry([(0.0, rise), (length, 0.0), (length, rise + 0.1), (0.0, rise + 0.1)],
+                        [Wall(), Wall(), Open(), Wall()])
+    normal = np.array([slope, 1.0]) / math.hypot(slope, 1.0)
+    weight = _sphere_mass(material, radius) * 9.81
+    gap = radius - _static_overlap(material, radius, weight * normal[1])
+    centre = np.array([0.5 * length, 0.5 * rise]) + gap * normal
+    return DEMSimulation(geometry, material, particles=[Particle(centre[0], centre[1], radius)])
 
 
 def _static_overlap(material: MaterialProperties, radius: float, force: float) -> float:
@@ -220,6 +235,42 @@ class TestDEMSimulationPhysics:
         assert curve.shape[1] == 4
         assert_allclose(curve[0, :3], [0.0, 0.0, 0.0], atol=1e-15)
 
+    def test_seated_platen_touches_bed_and_stays_fixed(self) -> None:
+        """Seating must lower the platen onto the top particle and hold it there without starting the load."""
+        material = _material()
+        footing = LoadedPlaten(load=Heaviside(2.0), mass=0.2)
+        geometry = Geometry.rectangle(0.1, 0.1, top=footing)
+        sim = DEMSimulation(geometry, material, particles=[Particle(0.05, 0.01, 0.01), Particle(0.05, 0.03, 0.01)])
+        sim.rest(0.2)
+        sim.seat_platens()
+        platen = sim.platens[0]
+        top = float(np.max(sim.pos[:, 1] + sim.radius))
+        assert_allclose(platen.starts[0, 1], top, atol=1e-12)
+        assert not platen.active
+        offset = platen.offset
+        sim.rest(0.05)
+        assert_allclose(platen.offset, offset, atol=1e-15)
+        assert_allclose(sim.load_time, 0.0, atol=1e-15)
+        # loading starts from the seated position, which compress cannot improve on
+        sim.compress(0.0)
+        assert platen.active
+        assert_allclose(platen.offset, offset, atol=1e-9)
+
+    def test_seat_without_platen_is_rejected(self) -> None:
+        """Seating needs a LoadedPlaten edge."""
+        sim = DEMSimulation(Geometry.rectangle(0.1, 0.1), _material(), radius_range=(0.01, 0.01))
+        with pytest.raises(ValueError, match=re.escape("The geometry has no LoadedPlaten edge to seat.")):
+            sim.seat_platens()
+
+    def test_seat_after_loading_is_rejected(self) -> None:
+        """A platen that loading has released cannot be seated again."""
+        geometry = Geometry.rectangle(0.1, 0.1, top=LoadedPlaten(load=Heaviside(2.0), mass=0.2))
+        sim = DEMSimulation(geometry, _material(), particles=[Particle(0.05, 0.01, 0.01)])
+        sim.compress(0.0)
+        with pytest.raises(ValueError,
+                           match=re.escape("Loading has already started; a released platen cannot be seated again.")):
+            sim.seat_platens()
+
     def test_side_platen_pushes_along_its_normal(self) -> None:
         """A platen on a side edge must move inwards along its normal and balance its load."""
         material = _material()
@@ -258,6 +309,31 @@ class TestDEMSimulationPhysics:
         assert_allclose(platen.displacement, expected, rtol=2e-2)
         assert_allclose(sim.pos[0, 0], 0.05, atol=1e-9)
         assert sim.frames[-1].platens[0].shape == (2, 2, 2)
+
+    def test_rolling_friction_holds_particle_on_gentle_incline(self) -> None:
+        """A particle must stay put on an incline with tan(theta) below the rolling friction coefficient."""
+        sim = _sphere_on_incline(slope=0.32, rolling_friction=0.4)
+        start = sim.pos[0].copy()
+        sim.rest(0.5)
+        # only the elastic deformation of the springs, some 40 um here, may move it
+        assert np.hypot(*(sim.pos[0] - start)) < 1.0e-4
+        assert np.hypot(*sim.vel[0]) < 1.0e-4
+
+    @pytest.mark.parametrize("rolling_friction", [0.0, 0.2, 0.4])
+    def test_particle_rolls_down_steep_incline(self, rolling_friction: float) -> None:
+        """Above the rolling limit a sphere must roll without slipping at a = g (sin - mu_r cos) / 1.4."""
+        slope = 0.48
+        sim = _sphere_on_incline(slope=slope, rolling_friction=rolling_friction)
+        down = np.array([1.0, -slope]) / math.hypot(1.0, slope)
+        sim.rest(0.1)
+        early_time, early_speed = sim.time, float(sim.vel[0] @ down)
+        sim.rest(0.2)
+        acceleration = (float(sim.vel[0] @ down) - early_speed) / (sim.time - early_time)
+        theta = math.atan(slope)
+        expected = 9.81 * (math.sin(theta) - rolling_friction * math.cos(theta)) / 1.4
+        assert_allclose(acceleration, expected, rtol=0.02)
+        # rolling without slipping: the contact point is at rest
+        assert_allclose(sim.omega[0] * sim.radius[0], -float(sim.vel[0] @ down), rtol=0.02)
 
     def test_rain_fills_non_rectangular_domain(self) -> None:
         """Raining must fill a trapezoid with non-overlapping particles that all stay inside it."""

@@ -312,6 +312,7 @@ class DEMSimulation:
         self.__next_segment = np.array([segment_of_edge.get((edge + 1) % n_edges, -1) for edge in solid_edges],
                                        dtype=np.int64)
         self.__wall_spring: npt.NDArray[np.float64] = np.zeros((self.n, len(solid), 2))
+        self.__wall_rolling: npt.NDArray[np.float64] = np.zeros((self.n, len(solid)))
 
     def __update_mass_properties(self) -> None:
         """Refresh mass and rotational inertia after the particle set has changed."""
@@ -340,6 +341,7 @@ class DEMSimulation:
         self.force = np.vstack((self.force, np.zeros((m, 2))))
         self.torque = np.concatenate((self.torque, np.zeros(m)))
         self.__wall_spring = np.concatenate((self.__wall_spring, np.zeros((m, ) + self.__wall_spring.shape[1:])))
+        self.__wall_rolling = np.concatenate((self.__wall_rolling, np.zeros((m, ) + self.__wall_rolling.shape[1:])))
         self.__update_mass_properties()
         self.__neighbours.invalidate()
         self.__forces_valid = False
@@ -357,6 +359,7 @@ class DEMSimulation:
         self.force = self.force[keep]
         self.torque = self.torque[keep]
         self.__wall_spring = self.__wall_spring[keep]
+        self.__wall_rolling = self.__wall_rolling[keep]
         self.__update_mass_properties()
         self.__neighbours.remove_particles(keep)
 
@@ -417,7 +420,7 @@ class DEMSimulation:
     #  Force evaluation                                                  #
     # ------------------------------------------------------------------ #
     def compute_forces(self) -> None:
-        """Evaluate every force and torque for the current state, without advancing the tangential history."""
+        """Evaluate every force and torque for the current state, without advancing the contact history."""
         self.__evaluate_forces(accumulate=False)
 
     def __evaluate_forces(self, accumulate: bool) -> None:
@@ -457,7 +460,7 @@ class DEMSimulation:
         """Add the particle-particle contact forces.
 
         Args:
-            increment: time over which the sliding velocity is accumulated into the tangential springs [s].
+            increment: time over which the sliding and rolling velocities are accumulated into the springs [s].
         """
         neighbours = self.__neighbours
         neighbours.update(self.pos, self.radius)
@@ -470,6 +473,7 @@ class DEMSimulation:
         touching = dist_sq < reach * reach
         # a contact that opened loses its history, so a later re-closure starts from zero
         neighbours.spring[~touching] = 0.0
+        neighbours.rolling[~touching] = 0.0
         contacts = np.flatnonzero(touching)
         if contacts.size == 0:
             return
@@ -486,9 +490,9 @@ class DEMSimulation:
         relative_velocity = self.vel[i] - self.vel[j] - spin[:, None] * tangent
         radius_i, radius_j = self.radius[i], self.radius[j]
         mass_i, mass_j = self.mass[i], self.mass[j]
+        effective_radius = radius_i * radius_j / (radius_i + radius_j)
         result = self.model.evaluate(normal, reach[contacts] - dist, relative_velocity, neighbours.spring[contacts],
-                                     increment, radius_i * radius_j / (radius_i + radius_j),
-                                     mass_i * mass_j / (mass_i + mass_j))
+                                     increment, effective_radius, mass_i * mass_j / (mass_i + mass_j))
         neighbours.spring[contacts] = result.tangential_spring
 
         n = self.n
@@ -498,6 +502,15 @@ class DEMSimulation:
         # both bodies receive a torque of the same sign, like two meshing gears
         cross = normal[:, 0] * result.tangential_force[:, 1] - normal[:, 1] * result.tangential_force[:, 0]
         self.torque -= np.bincount(i, radius_i * cross, n) + np.bincount(j, radius_j * cross, n)
+
+        if self.model.rolling_friction > 0.0:
+            # a particle rolls about its contact point, so its inertia there is I + m R^2
+            inertia_i = self.inertia[i] + mass_i * radius_i**2
+            inertia_j = self.inertia[j] + mass_j * radius_j**2
+            rolling = self.model.rolling(result, self.omega[i] - self.omega[j], neighbours.rolling[contacts], increment,
+                                         effective_radius, inertia_i * inertia_j / (inertia_i + inertia_j))
+            neighbours.rolling[contacts] = rolling.rolling_spring
+            self.torque += np.bincount(i, rolling.moment, n) - np.bincount(j, rolling.moment, n)
 
     def __segment_state(self) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         """Return the current start points, end points and velocities of the solid edges."""
@@ -547,7 +560,7 @@ class DEMSimulation:
         """Add the contact forces between the particles and the solid edges, and the reactions on the platens.
 
         Args:
-            increment: time over which the sliding velocity is accumulated into the tangential springs [s].
+            increment: time over which the sliding and rolling velocities are accumulated into the springs [s].
         """
         if self.__segment_starts.shape[0] == 0:
             return
@@ -557,6 +570,7 @@ class DEMSimulation:
         touching = dist_sq < (self.radius**2)[:, None]
         touching &= ~self.__redundant_vertex_contacts(t, starts, ends)
         self.__wall_spring[~touching] = 0.0
+        self.__wall_rolling[~touching] = 0.0
         if not np.any(touching):
             return
 
@@ -581,6 +595,12 @@ class DEMSimulation:
         self.force[:, 1] += np.bincount(particle, force[:, 1], n)
         cross = normal[:, 0] * result.tangential_force[:, 1] - normal[:, 1] * result.tangential_force[:, 0]
         self.torque -= np.bincount(particle, radius * cross, n)
+        if self.model.rolling_friction > 0.0:
+            # edges never rotate, so the relative spin is the particle's own
+            rolling = self.model.rolling(result, self.omega[particle], self.__wall_rolling[particle, segment],
+                                         increment, radius, self.inertia[particle] + self.mass[particle] * radius**2)
+            self.__wall_rolling[particle, segment] = rolling.rolling_spring
+            self.torque += np.bincount(particle, rolling.moment, n)
         # the particles push each edge with the opposite of the force it exerts on them
         segments = self.__segment_edge.size
         self.edge_forces[self.__segment_edge, 0] = -np.bincount(segment, force[:, 0], segments)
@@ -820,6 +840,26 @@ class DEMSimulation:
             self.step()
             if s % record_every == 0:
                 self.__record_frame(phase)
+
+    def seat_platens(self) -> None:
+        """Lower every loaded body with ``seat_on_bed`` onto the packing, and hold it there without releasing it.
+
+        Seating a body before the domain is full lets particles be rained around it afterwards, e.g. into the cribs
+        between railway sleepers, which would otherwise block it on its way down. The body stays fixed, and the load
+        clock stopped, until ``compress`` releases it.
+
+        Raises:
+            ValueError: if the geometry has no loaded platen.
+            ValueError: if loading has already started.
+        """
+        if not self.platens:
+            raise ValueError("The geometry has no LoadedPlaten edge to seat.")
+        if any(p.active for p in self.platens):
+            raise ValueError("Loading has already started; a released platen cannot be seated again.")
+        for platen in self.platens:
+            if platen.spec.seat_on_bed:
+                platen.seat(self.pos, self.radius)
+        self.__forces_valid = False
 
     def compress(self, duration: float, record_every: int = 40) -> None:
         """Apply the loads of the loaded platens for a given time.

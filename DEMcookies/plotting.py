@@ -1,6 +1,6 @@
 """Animation and snapshots of the recorded frames, and plots of the load curves of the loaded bodies."""
 
-from typing import List, Tuple
+from typing import List, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -35,6 +35,27 @@ def _clip_below(vertices: npt.NDArray[np.float64], level: float) -> npt.NDArray[
             t = (level - start[1]) / (end[1] - start[1])
             clipped.append(start + t * (end - start))
     return np.array(clipped, dtype=np.float64).reshape(-1, 2)
+
+
+def _current_outline(vertices: npt.NDArray[np.float64], platen_edges: Sequence[Tuple[int, ...]],
+                     platen_segments: Sequence[npt.NDArray[np.float64]]) -> npt.NDArray[np.float64]:
+    """Return the outline of the domain with every loaded body at its current position.
+
+    Args:
+        vertices: vertices of the domain as it was defined, shape (n, 2) [m].
+        platen_edges: indices of the edges of every loaded body.
+        platen_segments: current start and end points of the edges of every loaded body, shape (k, 2, 2) each [m].
+
+    Returns:
+        The vertices, with those of the loaded bodies moved along with them, shape (n, 2) [m].
+    """
+    outline = np.array(vertices, dtype=np.float64)
+    n = outline.shape[0]
+    for edges, segments in zip(platen_edges, platen_segments):
+        for edge, (start, end) in zip(edges, segments):
+            outline[edge] = start
+            outline[(edge + 1) % n] = end
+    return outline
 
 
 def _edge_label(edges: Tuple[int, ...]) -> str:
@@ -96,6 +117,7 @@ class _FramePainter:
             self.ax.add_collection(body)
         self.title = self.ax.set_title("")
         self.vertices = geometry.vertices
+        self.platen_edges = [platen.edges for platen in sim.platens]
         self.water = Polygon(np.zeros((0, 2)),
                              closed=True,
                              facecolor="#6baed6",
@@ -141,7 +163,9 @@ class _FramePainter:
         for body, segments in zip(self.bodies, frame.platens):
             body.set_segments(list(segments))
         if frame.water_level is not None:
-            wet = _clip_below(self.vertices, frame.water_level)
+            # a loaded body that moved into the domain displaces the water, so the outline follows it
+            outline = _current_outline(self.vertices, self.platen_edges, frame.platens)
+            wet = _clip_below(outline, frame.water_level)
             self.water.set_xy(wet if wet.shape[0] >= 3 else np.zeros((0, 2)))
             self.water.set_visible(wet.shape[0] >= 3)
         self.title.set_text(f"{frame.phase}   t = {frame.time:.3f} s   N = {frame.radii.size}")
