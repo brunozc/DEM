@@ -25,7 +25,7 @@ particles may sit in pore water, which buoys them, drags on them and, optionally
 
 ## Installation
 
-DEMcookies needs Python 3.10 or later. From the repository root:
+DEMcookies needs Python 3.12 or later. From the repository root:
 
 ```bash
 python -m venv venv
