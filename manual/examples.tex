@@ -1148,6 +1148,109 @@ this model: the formation is rigid, the ballast has no fines, and wet grain
 surfaces have the same friction as dry ones and do not break.  The suggested
 studies below list how some of them could be added.
 
+\section{Three-dimensional examples}
+\label{sec:examples-3d}
+
+Four scripts in \texttt{examples/} exercise the three-dimensional model of Section~\ref{sec:3d}.
+Each runs in one to three minutes and writes an animation in an oblique view, which a PDF cannot show; the animations are kept in \texttt{examples/videos/}, where the README shows them.
+The figures of this section and the animations are produced with
+\begin{verbatim}
+  python manual/scripts/examples_3d.py
+\end{verbatim}
+The examples share the material of the reference simulation, $E=\qty{5}{\mega\pascal}$, $\nu=0.25$, $e=0.4$ and $\mu=0.5$, with a rolling friction $\mu_{r}=0.1$ for the three dry ones, and are filled by raining.
+Figures~\ref{fig:examples-3d-sections} and~\ref{fig:examples-3d-hopper} show vertical sections through three of them.
+
+\subsection{Square footing}
+
+The script \texttt{examples/square\_footing\_3d.py} loads a rigid square footing in the middle of a granular bed, a problem without a planar counterpart.
+The box is \qty{0.2}{\metre} wide and deep and \qty{0.15}{\metre} high, with a rough floor and smooth sides.
+Its top is split into five faces: the footing, a square of side \qty{70}{\milli\metre} that carries a \texttt{LoadedPlaten} of mass \qty{0.2}{\kilogram} with self weight, and four open trapezoids around it.
+The box is rained full with \num{552} particles of radius \qtyrange{8}{12}{\milli\metre}, to a bed top at \qty{0.119}{\metre}.
+The footing is seated on the bed, and the load is ramped to \qty{15}{\newton} in \qty{0.4}{\second}, held for \qty{0.2}{\second} and removed in \qty{0.2}{\second}.
+The reaction follows the load plus the weight of the footing throughout (Figure~\ref{fig:examples-3d-curves}).
+The footing settles \qty{7.4}{\milli\metre} by the time the load reaches its peak and \qty{8.0}{\milli\metre} by the end of the hold.
+Once the load is removed it keeps \qty{6.2}{\milli\metre}, and its reaction, \qty{1.97}{\newton}, balances its weight of \qty{1.96}{\newton}.
+
+\subsection{Cone penetration}
+
+The script \texttt{examples/cone\_penetration\_3d.py} pushes a rigid cone into the fill of a box \qty{0.16}{\metre} wide and deep and \qty{0.2}{\metre} high.
+The cone has an apex angle of \ang{60} and a base of radius \qty{30}{\milli\metre} in the top of the box, so it is \qty{52}{\milli\metre} high.
+Its surface is approximated by twelve triangular faces that meet at its tip and carry the same \texttt{LoadedPlaten}, of mass \qty{0.3}{\kilogram} with self weight.
+The rest of the top, a square with a dodecagonal hole, is split into two non-convex faces, each around one half of the hole.
+The box is rained full with \num{708} particles of radius \qtyrange{7}{10}{\milli\metre}, to a bed top at \qty{0.137}{\metre}; the cone is seated on the fill with its tip, and the load is ramped to \qty{20}{\newton} in \qty{0.8}{\second} and held.
+Under its weight of \qty{2.94}{\newton} and the first few newtons of load the cone pushes the loose surface grains aside and sinks quickly, by \qty{17}{\milli\metre} at \qty{2}{\newton} and \qty{36}{\milli\metre} at \qty{4}{\newton}, two thirds of its height (Figure~\ref{fig:examples-3d-curves}).
+The resistance then rises steeply as the cone becomes embedded up to its base: it penetrates only \qty{9}{\milli\metre} more up to \qty{20}{\newton}, \qty{45}{\milli\metre} in all (Figure~\ref{fig:examples-3d-sections}).
+
+\subsection{Hopper discharge}
+
+The script \texttt{examples/hopper\_discharge\_3d.py} drains a bin through a hopper.
+The bin is \qty{0.12}{\metre} square and \qty{0.24}{\metre} high, and its lower \qty{50}{\milli\metre} narrow into a hopper with a square outlet of side \qty{70}{\milli\metre}, about five particle diameters.
+The outlet is a trap door: a \texttt{LoadedPlaten} of \qty{50}{\gram} with self weight and no seating, which holds the grains while the bin is filled.
+Once \texttt{compress} releases it, a load of \qty{5}{\newton} pulls it down, far faster than the grains can follow, and grains that leave through the outlet fall out of the domain and are removed, as through any open face.
+The bin is rained full with \num{1044} particles of radius \qtyrange{6}{8}{\milli\metre}, \qty{3.85}{\kilo\gram} of grains, to a bed top at \qty{0.216}{\metre}.
+In the first second after the door opens, \qty{2.33}{\kilo\gram} of grains, \num{61}\% of them, drain out at a nearly constant rate: \qty{2.49}{\kilo\gram\per\second} between \num{10} and \num{80}\% of that mass (Figure~\ref{fig:examples-3d-hopper}).
+The rate does not fall as the bin empties.
+A granular bed drains at a rate set by its outlet, not by its head, unlike a liquid: arches that form and collapse over the outlet carry the weight of the grains above it.
+
+\subsection{Upward seepage}
+
+The script \texttt{examples/upward\_seepage\_3d.py} is the three-dimensional counterpart of the seepage example of Section~\ref{sec:water-examples}.
+A permeameter \qty{80}{\milli\metre} square and \qty{0.3}{\metre} high, with smooth side walls and the water table at \qty{0.27}{\metre}, is rained full under water with \num{572} spheres of radius \qtyrange{5}{7}{\milli\metre}, without rolling resistance.
+The bed top lies at \qty{0.153}{\metre} and the mean porosity is \num{0.46}.
+At rest the floor carries the buoyant weight of the bed, \qty{7.72}{\newton} against \qty{7.71}{\newton}.
+The force of a seepage flow on the fixed bed equals that buoyant weight at the minimum fluidization velocity $U_{mf}=\qty{0.1025}{\metre\per\second}$, and the flow is then ramped to $2U_{mf}$ in \qty{3}{\second}.
+The force on the floor follows the fixed-bed prediction $1-F_{f}/W'$ up to $U_{mf}$ and nearly vanishes beyond it, where the bed lifts and expands, from \qty{153}{\milli\metre} to \qty{199}{\milli\metre} at $2U_{mf}$ (Figure~\ref{fig:examples-3d-seepage}).
+
+\begin{figure}[htbp]
+  \centering
+  \begin{subfigure}[b]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/square_footing_3d_section.png}
+    \caption{square footing, at the end of the run}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.42\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/cone_penetration_3d_section.png}
+    \caption{cone, under \qty{20}{\newton}}
+  \end{subfigure}
+  \caption{Vertical sections $z=\text{const}$ through the middle of the square footing and of the cone examples.
+  Every sphere that the plane cuts is drawn as a circle of the radius of its section, coloured by its speed; the red lines are the sections of the loaded bodies, and the dashed lines those of open faces.}
+  \label{fig:examples-3d-sections}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/square_footing_3d_curves.png}
+  \includegraphics[width=\textwidth]{figures/cone_penetration_3d_curves.png}
+  \caption{Load histories (left) and load--displacement responses (right) of the square footing (top), whose load is ramped, held and removed, and of the cone (bottom), whose load is ramped and held.}
+  \label{fig:examples-3d-curves}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \begin{subfigure}[b]{0.38\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/hopper_discharge_3d_section.png}
+    \caption{section through the middle of the bin}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.58\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/hopper_discharge_3d_curve.png}
+    \caption{discharged mass}
+  \end{subfigure}
+  \caption{Discharge of the hopper: the grains in the plane through the middle of the bin while it drains, coloured by their speed, and the mass discharged against time, with the steady rate fitted to it.}
+  \label{fig:examples-3d-hopper}
+\end{figure}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\textwidth]{figures/upward_seepage_3d.png}
+  \caption{Upward seepage through the 3D column: the force on the floor, against the fixed-bed prediction, and the height of the bed against the superficial velocity of the upward flow.}
+  \label{fig:examples-3d-seepage}
+\end{figure}
+
 \section{Suggested further studies}
 \label{sec:further}
 

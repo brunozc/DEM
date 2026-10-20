@@ -97,6 +97,8 @@ on the face it sweeps. `render_animation` and `render_frame` draw a 3D simulatio
 
 The [examples/](examples/) folder holds more involved cases. Each writes its figures to `output/`.
 
+### Two dimensions
+
 | Script | Problem |
 | --- | --- |
 | [footing_on_trapezoid.py](examples/footing_on_trapezoid.py) | Strip footing on a fill in a trapezoidal container; the load history is chosen on the command line, e.g. `python examples/footing_on_trapezoid.py sinusoidal`. |
@@ -104,7 +106,25 @@ The [examples/](examples/) folder holds more involved cases. Each writes its fig
 | [upward_seepage.py](examples/upward_seepage.py) | Upward seepage through a submerged column, from the quick condition to fluidization. |
 | [consolidation.py](examples/consolidation.py) | Consolidation of a submerged column under a sudden load, compared with Terzaghi's theory. |
 | [ballast_cyclic.py](examples/ballast_cyclic.py) | Cyclic loading of railway ballast under a sleeper: dry, half submerged and saturated. Runs fifteen parallel processes, about twenty minutes on sixteen cores. |
-| [square_footing_3d.py](examples/square_footing_3d.py) | Square footing in the middle of a granular bed in a box, a 3D problem: the top of the box is split into the footing and four open faces (`--peak` sets the peak load [N]). |
+
+### Three dimensions
+
+Each of these runs in a few minutes.
+
+| Script | Problem |
+| --- | --- |
+| [square_footing_3d.py](examples/square_footing_3d.py) | Square footing in the middle of a granular bed in a box: the top of the box is split into the footing and four open faces (`--peak` sets the peak load [N]). |
+| [cone_penetration_3d.py](examples/cone_penetration_3d.py) | A 60° cone of twelve faces pushed into a granular bed; the top of the box around it is made of two non-convex faces (`--peak` sets the peak load [N]). |
+| [hopper_discharge_3d.py](examples/hopper_discharge_3d.py) | A bin with a hopper whose trap door opens: the grains drain out through the outlet at a constant rate. |
+| [upward_seepage_3d.py](examples/upward_seepage_3d.py) | Upward seepage through a submerged column, from the quick condition to fluidization, the 3D counterpart of `upward_seepage.py`. |
+
+Their animations, kept in [examples/videos/](examples/videos/), show the particles coloured by speed:
+
+| Square footing | Cone penetration |
+| :---: | :---: |
+| ![Square footing pressed into a granular bed](examples/videos/square_footing_3d.gif) | ![Cone pushed into a granular bed](examples/videos/cone_penetration_3d.gif) |
+| **Hopper discharge** | **Upward seepage** |
+| ![Grains draining from a hopper through its trap door](examples/videos/hopper_discharge_3d.gif) | ![Submerged column fluidized by an upward flow](examples/videos/upward_seepage_3d.gif) |
 
 ## Manual
 
@@ -117,7 +137,8 @@ pdflatex manual && bibtex manual && pdflatex manual && pdflatex manual
 ```
 
 The figures in `manual/figures/` are produced by the scripts in [manual/scripts/](manual/scripts/), run from the
-repository root, e.g. `python manual/scripts/reference.py`.
+repository root, e.g. `python manual/scripts/reference.py`; `python manual/scripts/examples_3d.py` also renews the
+animations in `examples/videos/`.
 
 ## License
 
