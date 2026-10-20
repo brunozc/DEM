@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose
-from PIL import Image
+from PIL import GifImagePlugin, Image
 
 from DEMcookies import DEMSimulation, Geometry, Heaviside, LoadedPlaten, MaterialProperties, Particle, Water
 from DEMcookies.plotting import _clip_below, _current_outline, plot_load_curves, render_animation, render_frame
@@ -40,6 +40,7 @@ class TestPlotting:
         sim = _loaded_simulation()
         render_animation(sim, str(tmp_path / "run.gif"), every=3)
         with Image.open(tmp_path / "run.gif") as gif:
+            assert isinstance(gif, GifImagePlugin.GifImageFile)
             assert gif.n_frames == len(range(0, len(sim.frames), 3))
 
     def test_animation_with_invalid_stride_is_rejected(self, tmp_path: Path) -> None:

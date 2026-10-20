@@ -151,7 +151,7 @@ def main() -> None:
     print(f"minimum fluidization velocity of the fixed bed = {critical:.4f} m/s")
 
     weight = buoyant_weight(sim)
-    prediction = [(u, max(0.0, 1.0 - fixed_bed_force(sim, u) / weight))
+    prediction = [(float(u), max(0.0, 1.0 - fixed_bed_force(sim, u) / weight))
                   for u in np.linspace(0.0, RAMP_TOP * critical, 81)]
     rows = run_ramp(sim, critical)
     for velocity, base, top, porosity in rows[9::10]:
