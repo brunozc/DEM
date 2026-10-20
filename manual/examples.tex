@@ -18,7 +18,7 @@ The automated test suite is executed with
 \begin{verbatim}
   python -m pytest tests/ -q
 \end{verbatim}
-and contains \num{147} tests, grouped by module, which include checks that
+and contains \num{278} tests, grouped by module, which include checks that
 invalid input is rejected with a specific message.  The four examples below each
 isolate one equation of Chapter~\ref{cha:formulation}.  Further tests compare
 complete simulations with closed-form results: the static Hertz overlap of a
@@ -26,8 +26,10 @@ particle resting on a wall, a single contact for a particle on or next to a
 vertex shared by two edges, conservation of momentum in an oblique collision,
 the equilibrium of a strip footing, of a platen on a side wall and of a
 V-shaped body of two edges that touches a particle with its tip, the removal of
-particles through an open edge, and the filling of a trapezoidal domain.  All
-tests pass.
+particles through an open edge, and the filling of a trapezoidal domain.
+The three-dimensional model is checked in the same way: a particle resting on a floor face, a single contact on the edges and the vertex shared by four floor faces and under the tip of a pyramidal body, an oblique collision, rolling on an inclined floor (Section~\ref{sec:3d}), loaded and seated platens, the filling of an extruded trapezoid, and the reproduction of planar simulations by their extrusions.
+For the water, the tests check buoyancy, the settling velocity, the porosity $1-\pi/6$ of a simple cubic lattice and the dissipation of an excess pressure.
+All tests pass.
 
 \subsection{Example 1 -- free fall of a single body}
 

@@ -1,4 +1,8 @@
-"""Polygonal simulation domain whose edges each carry a boundary condition."""
+"""Polygonal simulation domain whose edges each carry a boundary condition.
+
+``Geometry3D``, in ``geometry3d``, is its three-dimensional counterpart, a polyhedron whose faces carry the boundary
+conditions.
+"""
 
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -6,8 +10,12 @@ import numpy as np
 import numpy.typing as npt
 
 from .boundary import BoundaryCondition, LoadedPlaten, Open, Wall, resolve_direction
+from .facets import SegmentFacets
 from .globals import GEOMETRY_TOLERANCE
 from .segments import project_onto_segments
+
+# the closest-point query stays importable from here, where existing scripts and tests import it from
+__all__ = ["Geometry", "project_onto_segments"]
 
 
 def _cross(a: npt.NDArray[np.float64], b: npt.NDArray[np.float64]) -> float:
@@ -115,6 +123,7 @@ class Geometry:
         self.__boundary_conditions: Tuple[BoundaryCondition, ...] = tuple(boundary_conditions)
         self.__starts = points
         self.__ends = np.roll(points, -1, axis=0)
+        self.__facets = SegmentFacets(self.__starts, self.__ends)
         edge_vectors = self.__ends - self.__starts
         lengths = np.hypot(edge_vectors[:, 0], edge_vectors[:, 1])
 
@@ -179,6 +188,16 @@ class Geometry:
         return cls(vertices, conditions)
 
     @property
+    def dimension(self) -> int:
+        """Number of space dimensions, 2."""
+        return 2
+
+    @property
+    def facet_name(self) -> str:
+        """Name of the facets of the domain, which are edges."""
+        return "edge"
+
+    @property
     def vertices(self) -> npt.NDArray[np.float64]:
         """Polygon vertices, shape (n, 2) [m]."""
         return self.__vertices.copy()
@@ -192,6 +211,16 @@ class Geometry:
     def n_edges(self) -> int:
         """Number of edges."""
         return int(self.__vertices.shape[0])
+
+    @property
+    def n_facets(self) -> int:
+        """Number of facets, i.e. of edges."""
+        return self.n_edges
+
+    @property
+    def facets(self) -> SegmentFacets:
+        """The edges as segments, for the contact queries."""
+        return self.__facets
 
     @property
     def edge_starts(self) -> npt.NDArray[np.float64]:
@@ -230,6 +259,11 @@ class Geometry:
         x_max, y_max = self.__vertices.max(axis=0)
         return float(x_min), float(y_min), float(x_max), float(y_max)
 
+    @property
+    def bounds(self) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Lowest and highest coordinates (x, y) of the polygon [m]."""
+        return self.__vertices.min(axis=0), self.__vertices.max(axis=0)
+
     def contains(self, points: npt.NDArray[np.float64]) -> npt.NDArray[np.bool_]:
         """Check which points lie inside the polygon, using the even-odd crossing rule.
 
@@ -259,8 +293,18 @@ class Geometry:
         Returns:
             The distances, shape (n, edges) [m].
         """
-        _, offset = project_onto_segments(points, self.__starts, self.__ends)
-        return np.asarray(np.hypot(offset[..., 0], offset[..., 1]))
+        return self.__facets.distances(points)
+
+    def distance_to_facets(self, points: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Distance from every point to every facet, i.e. to every edge.
+
+        Args:
+            points: points, shape (n, 2) [m].
+
+        Returns:
+            The distances, shape (n, edges) [m].
+        """
+        return self.__facets.distances(points)
 
     def __check_simple(self, tolerance: float) -> None:
         """Check that adjacent edges do not fold back and non-adjacent edges do not intersect.

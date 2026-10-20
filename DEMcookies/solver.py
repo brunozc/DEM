@@ -2,8 +2,9 @@
 
 ``VelocityVerlet`` is a small, self-contained integrator used to verify the scheme. ``DEMSimulation`` is the full
 engine: it keeps the particle state in arrays, finds particle contacts with a cell grid and a Verlet neighbour list,
-evaluates the Hertz-Mindlin forces between particles and against the solid edges of the domain, moves the loaded
-platens, and advances everything in time with velocity Verlet.
+evaluates the Hertz-Mindlin forces between particles and against the solid facets of the domain, moves the loaded
+platens, and advances everything in time with velocity Verlet. It runs in two or in three dimensions, as set by the
+geometry: a polygon (``Geometry``) or a polyhedron (``Geometry3D``).
 """
 
 import math
@@ -15,12 +16,13 @@ import numpy.typing as npt
 
 from .boundary import Open, Platen
 from .contact import HertzMindlinModel, MaterialProperties, rayleigh_time_step
-from .geometry import Geometry
-from .segments import project_onto_segments
+from .facets import FacetSet
+from .geometry3d import Domain
 from .water import PoreWater, Water, evaluate_at
-from .globals import ESCAPE_CHECK_INTERVAL, GEOMETRY_TOLERANCE, VERTEX_TOLERANCE, GlobalSettings
+from .globals import ESCAPE_CHECK_INTERVAL, GEOMETRY_TOLERANCE, GlobalSettings
 from .neighbours import NeighbourList
-from .particle_generation import Particle
+from .particle_generation import AnyParticle
+from .vectors import cross, norm, rotation_shape, scale, scatter_add, spin_cross
 
 
 class VelocityVerlet:
@@ -119,11 +121,12 @@ class Frame:
 
     Attributes:
         time: simulation time [s].
-        positions: particle centres, shape (n, 2) [m].
+        positions: particle centres, shape (n, d) [m].
         radii: particle radii [m].
         speeds: particle speeds [m/s].
-        platens: current edges of every loaded body, each of shape (k, 2, 2) holding the start and end point of its
-            k edges [m].
+        platens: current facets of every loaded body, each of shape (k, m, d) holding the m vertices of its k
+            facets: the start and end point of each edge in 2D, and the vertices of each face, padded with copies
+            of its last vertex, in 3D [m].
         phase: name of the stage the frame belongs to.
         water_level: height of the free surface of the water [m], or None without water.
     """
@@ -142,7 +145,7 @@ class LoadCurve:
     """Load history recorded for one loaded body.
 
     Attributes:
-        edges: indices of the geometry edges of the body.
+        edges: indices of the geometry facets of the body, edges in 2D and faces in 3D; ``faces`` is the same tuple.
         time: time since loading started [s].
         applied: applied load [N].
         displacement: translation of the body along its direction of motion since loading started [m].
@@ -155,25 +158,36 @@ class LoadCurve:
     displacement: List[float] = field(default_factory=list)
     reaction: List[float] = field(default_factory=list)
 
+    @property
+    def faces(self) -> Tuple[int, ...]:
+        """Indices of the geometry faces of the body, under their 3D name; the same tuple as ``edges``."""
+        return self.edges
+
     def as_array(self) -> npt.NDArray[np.float64]:
         """Return the curve as an array with columns time, applied, displacement and reaction."""
         return np.column_stack((self.time, self.applied, self.displacement, self.reaction)).reshape(-1, 4)
 
 
 class DEMSimulation:
-    """A 2D discrete element simulation with Hertz-Mindlin contacts in a polygonal domain.
+    """A discrete element simulation with Hertz-Mindlin contacts, in a polygonal (2D) or polyhedral (3D) domain.
+
+    The geometry sets the number of space dimensions d. Vectors have d components; rotations, angular velocities
+    and torques are scalars about the out-of-plane axis in 2D and vectors in 3D. The y axis is vertical in both.
 
     Attributes:
-        pos: particle centres, shape (n, 2) [m].
-        vel: particle velocities, shape (n, 2) [m/s].
-        omega: particle angular velocities [rad/s].
+        dimension: number of space dimensions, 2 or 3.
+        pos: particle centres, shape (n, d) [m].
+        vel: particle velocities, shape (n, d) [m/s].
+        omega: particle angular velocities, shape (n,) in 2D or (n, 3) in 3D [rad/s].
         radius: particle radii [m].
         force: total force on each particle at the last evaluation, apart from the drag of the water, which is
-            integrated implicitly, shape (n, 2) [N].
-        fluid_force: force of the water on each particle at the last evaluation, including the drag, shape (n, 2)
+            integrated implicitly, shape (n, d) [N].
+        torque: total torque on each particle at the last evaluation, shape (n,) in 2D or (n, 3) in 3D [N m].
+        fluid_force: force of the water on each particle at the last evaluation, including the drag, shape (n, d)
             [N].
         porosity: local volume porosity at each particle, computed only when there is water (NaN otherwise).
-        edge_forces: force the particles exert on each edge of the geometry, shape (edges, 2) [N].
+        edge_forces: force the particles exert on each facet of the geometry, an edge in 2D or a face in 3D, shape
+            (facets, d) [N]; ``face_forces`` is the same array.
         platens: runtime state of every loaded body.
         frames: recorded snapshots.
         load_curves: recorded load history of every loaded body.
@@ -182,27 +196,29 @@ class DEMSimulation:
     """
 
     def __init__(self,
-                 geometry: Geometry,
+                 geometry: Domain,
                  material: MaterialProperties,
                  radius_range: Optional[Tuple[float, float]] = None,
-                 particles: Optional[Sequence[Particle]] = None,
+                 particles: Optional[Sequence[AnyParticle]] = None,
                  settings: Optional[GlobalSettings] = None,
                  dt: Optional[float] = None,
                  water: Optional[Water] = None) -> None:
         """Set up the simulation.
 
         Args:
-            geometry: domain, with a boundary condition on every edge.
+            geometry: domain, a polygon or a polyhedron with a boundary condition on every facet.
             material: material shared by the particles and boundaries.
             radius_range: smallest and largest radius of rained particles [m]; defaults to the range of the
                 initial particles.
-            particles: initial particles; the domain starts empty when None.
+            particles: initial particles, ``Particle`` in a polygon and ``Particle3D`` in a polyhedron; the domain
+                starts empty when None.
             settings: numerical settings; defaults to ``GlobalSettings()``.
             dt: time step [s]; defaults to a fraction of the Rayleigh time step of the smallest particle, or of the
                 drag relaxation time if that is shorter.
             water: pore water; the particles are dry when None.
 
         Raises:
+            ValueError: if a particle has a different number of dimensions than the geometry.
             ValueError: if neither a radius range nor particles are given.
             ValueError: if the radius range is not 0 < r_min <= r_max.
             ValueError: if a particle radius is not positive.
@@ -214,10 +230,16 @@ class DEMSimulation:
         self.material = material
         self.settings = settings or GlobalSettings()
         self.model = HertzMindlinModel(material)
+        self.dimension = geometry.dimension
+        d = self.dimension
 
         initial = list(particles or [])
-        self.pos: npt.NDArray[np.float64] = np.array([[p.x, p.y] for p in initial], dtype=np.float64).reshape(-1, 2)
-        self.vel: npt.NDArray[np.float64] = np.array([[p.vx, p.vy] for p in initial], dtype=np.float64).reshape(-1, 2)
+        for k, particle in enumerate(initial):
+            if particle.dimension != d:
+                raise ValueError(f"Particle {k} is {_DIMENSION_NAMES[particle.dimension]}, but the geometry is "
+                                 f"{_DIMENSION_NAMES[d]}.")
+        self.pos: npt.NDArray[np.float64] = np.array([p.position for p in initial], dtype=np.float64).reshape(-1, d)
+        self.vel: npt.NDArray[np.float64] = np.array([p.velocity for p in initial], dtype=np.float64).reshape(-1, d)
         self.radius: npt.NDArray[np.float64] = np.array([p.radius for p in initial], dtype=np.float64)
         if np.any(self.radius <= 0.0):
             raise ValueError("Particle radii must be positive.")
@@ -229,13 +251,13 @@ class DEMSimulation:
             raise ValueError(f"radius_range must satisfy 0 < r_min <= r_max, got {radius_range}.")
         outside = np.flatnonzero(~geometry.contains(self.pos))
         if outside.size:
-            x, y = self.pos[outside[0]]
-            raise ValueError(f"Particle {outside[0]} at ({x:.4g}, {y:.4g}) lies outside the domain.")
+            coordinates = ", ".join(f"{c:.4g}" for c in self.pos[outside[0]])
+            raise ValueError(f"Particle {outside[0]} at ({coordinates}) lies outside the domain.")
         self.radius_range = (float(radius_range[0]), float(radius_range[1]))
 
-        self.omega: npt.NDArray[np.float64] = np.zeros(self.n)
-        self.force: npt.NDArray[np.float64] = np.zeros((self.n, 2))
-        self.torque: npt.NDArray[np.float64] = np.zeros(self.n)
+        self.omega: npt.NDArray[np.float64] = np.zeros(rotation_shape(self.n, d))
+        self.force: npt.NDArray[np.float64] = np.zeros((self.n, d))
+        self.torque: npt.NDArray[np.float64] = np.zeros(rotation_shape(self.n, d))
         self.__update_mass_properties()
 
         r_min = min([self.radius_range[0]] + ([float(self.radius.min())] if self.n else []))
@@ -247,16 +269,17 @@ class DEMSimulation:
         self.dt = dt if dt is not None else rayleigh_time_step(material, r_min, self.settings.time_step_safety)
         self.water: Optional[Water] = None
         self.__pore_water: Optional[PoreWater] = None
-        self.fluid_force: npt.NDArray[np.float64] = np.zeros((self.n, 2))
+        self.fluid_force: npt.NDArray[np.float64] = np.zeros((self.n, d))
         self.porosity: npt.NDArray[np.float64] = np.full(self.n, np.nan)
         self.__drag_coefficient: npt.NDArray[np.float64] = np.zeros(self.n)
-        self.__water_velocity: npt.NDArray[np.float64] = np.zeros((self.n, 2))
+        self.__water_velocity: npt.NDArray[np.float64] = np.zeros((self.n, d))
         self.set_water(water)
-        self.__gravity = np.array([0.0, -self.settings.gravity])
+        self.__gravity = np.zeros(d)
+        self.__gravity[1] = -self.settings.gravity
         self.__escape_distance = self.settings.escape_margin * r_max
-        self.__neighbours = NeighbourList(self.settings.neighbour_skin * r_min)
+        self.__neighbours = NeighbourList(self.settings.neighbour_skin * r_min, d)
         self.__setup_boundaries()
-        self.edge_forces: npt.NDArray[np.float64] = np.zeros((geometry.n_edges, 2))
+        self.edge_forces: npt.NDArray[np.float64] = np.zeros((geometry.n_facets, d))
         self.__forces_valid = False
 
         self.time = 0.0
@@ -271,48 +294,47 @@ class DEMSimulation:
         """Number of particles in the simulation."""
         return int(self.radius.size)
 
+    @property
+    def face_forces(self) -> npt.NDArray[np.float64]:
+        """Force the particles exert on each face of a 3D domain, under its 3D name; the same array as edge_forces."""
+        return self.edge_forces
+
     # ------------------------------------------------------------------ #
     #  Set-up                                                            #
     # ------------------------------------------------------------------ #
     def __setup_boundaries(self) -> None:
-        """Build the arrays of the solid edges (walls and platens) the particles can touch."""
-        conditions = self.geometry.boundary_conditions
-        n_edges = len(conditions)
-        starts = self.geometry.edge_starts
-        ends = self.geometry.edge_ends
-        normals = self.geometry.inward_normals
+        """Build the set of the solid facets (walls and platens) the particles can touch."""
+        geometry = self.geometry
+        conditions = geometry.boundary_conditions
+        normals = geometry.inward_normals
 
-        solid = [(edge, condition) for edge, condition in enumerate(conditions) if not isinstance(condition, Open)]
-        solid_edges = [edge for edge, _ in solid]
-        segment_of_edge = {edge: s for s, edge in enumerate(solid_edges)}
+        solid = [(index, condition) for index, condition in enumerate(conditions) if not isinstance(condition, Open)]
+        solid_indices = [index for index, _ in solid]
+        slot_of_facet = {index: s for s, index in enumerate(solid_indices)}
         friction = np.empty(len(solid))
-        for s, (edge, condition) in enumerate(solid):
+        for s, (_, condition) in enumerate(solid):
             friction[s] = self.material.friction if condition.friction is None else condition.friction
 
-        # every loaded body moves all of its edges, which may be any subset of the solid edges
+        # every loaded body moves all of its facets, which may be any subset of the solid facets
         self.platens: List[Platen] = []
-        self.__platen_segment_groups: List[npt.NDArray[np.int64]] = []
-        platen_of_segment = np.full(len(solid), -1, dtype=np.int64)
-        for spec, edges in self.geometry.platen_groups:
-            segments = np.array([segment_of_edge[edge] for edge in edges], dtype=np.int64)
-            platen_of_segment[segments] = len(self.platens)
-            self.__platen_segment_groups.append(segments)
-            self.platens.append(Platen(edges, spec, starts[list(edges)], ends[list(edges)], normals[list(edges)]))
+        self.__platen_slot_groups: List[npt.NDArray[np.int64]] = []
+        platen_of_slot = np.full(len(solid), -1, dtype=np.int64)
+        for spec, indices in geometry.platen_groups:
+            slots = np.array([slot_of_facet[index] for index in indices], dtype=np.int64)
+            platen_of_slot[slots] = len(self.platens)
+            self.__platen_slot_groups.append(slots)
+            body = geometry.facets.select(list(indices))
+            self.platens.append(Platen.from_facets(indices, spec, body, normals[list(indices)]))
 
-        self.__has_open_edges = len(solid) < n_edges
-        self.__segment_edge = np.array(solid_edges, dtype=np.int64)
-        self.__segment_starts = starts[solid_edges].reshape(-1, 2)
-        self.__segment_ends = ends[solid_edges].reshape(-1, 2)
-        self.__segment_normals = normals[solid_edges].reshape(-1, 2)
-        self.__segment_friction = friction
-        self.__platen_of_segment = platen_of_segment
-        self.__platen_segments = np.flatnonzero(platen_of_segment >= 0)
-        self.__previous_segment = np.array([segment_of_edge.get((edge - 1) % n_edges, -1) for edge in solid_edges],
-                                           dtype=np.int64)
-        self.__next_segment = np.array([segment_of_edge.get((edge + 1) % n_edges, -1) for edge in solid_edges],
-                                       dtype=np.int64)
-        self.__wall_spring: npt.NDArray[np.float64] = np.zeros((self.n, len(solid), 2))
-        self.__wall_rolling: npt.NDArray[np.float64] = np.zeros((self.n, len(solid)))
+        self.__has_open_facets = len(solid) < len(conditions)
+        self.__solid_index = np.array(solid_indices, dtype=np.int64)
+        self.__solid: FacetSet = geometry.facets.select(solid_indices)
+        self.__solid_normals = normals[solid_indices].reshape(-1, self.dimension)
+        self.__solid_friction = friction
+        self.__platen_of_slot = platen_of_slot
+        self.__platen_slots = np.flatnonzero(platen_of_slot >= 0)
+        self.__wall_spring: npt.NDArray[np.float64] = np.zeros((self.n, len(solid), self.dimension))
+        self.__wall_rolling: npt.NDArray[np.float64] = np.zeros((self.n, ) + rotation_shape(len(solid), self.dimension))
 
     def __update_mass_properties(self) -> None:
         """Refresh mass and rotational inertia after the particle set has changed."""
@@ -327,19 +349,19 @@ class DEMSimulation:
         """Add particles at the end of the state arrays, so existing indices stay valid.
 
         Args:
-            positions: centres of the new particles, shape (m, 2) [m].
+            positions: centres of the new particles, shape (m, d) [m].
             radii: radii of the new particles [m].
-            velocities: velocities of the new particles, shape (m, 2) [m/s].
+            velocities: velocities of the new particles, shape (m, d) [m/s].
         """
         m = radii.size
         if m == 0:
             return
         self.pos = np.vstack((self.pos, positions))
         self.vel = np.vstack((self.vel, velocities))
-        self.omega = np.concatenate((self.omega, np.zeros(m)))
+        self.omega = np.concatenate((self.omega, np.zeros(rotation_shape(m, self.dimension))))
         self.radius = np.concatenate((self.radius, radii))
-        self.force = np.vstack((self.force, np.zeros((m, 2))))
-        self.torque = np.concatenate((self.torque, np.zeros(m)))
+        self.force = np.vstack((self.force, np.zeros((m, self.dimension))))
+        self.torque = np.concatenate((self.torque, np.zeros(rotation_shape(m, self.dimension))))
         self.__wall_spring = np.concatenate((self.__wall_spring, np.zeros((m, ) + self.__wall_spring.shape[1:])))
         self.__wall_rolling = np.concatenate((self.__wall_rolling, np.zeros((m, ) + self.__wall_rolling.shape[1:])))
         self.__update_mass_properties()
@@ -369,7 +391,7 @@ class DEMSimulation:
         if np.all(inside):
             return
         outside = np.flatnonzero(~inside)
-        distance = self.geometry.distance_to_edges(self.pos[outside]).min(axis=1)
+        distance = self.geometry.distance_to_facets(self.pos[outside]).min(axis=1)
         escaped = outside[distance > self.__escape_distance]
         if escaped.size == 0:
             return
@@ -407,14 +429,15 @@ class DEMSimulation:
         """Excess pore pressure, above hydrostatic, at given points; zero without coupled water.
 
         Args:
-            points: points, shape (n, 2) [m].
+            points: points, shape (n, d) [m].
 
         Returns:
             The excess pore pressure at each point [Pa].
         """
+        d = self.dimension
         if self.__pore_water is None:
-            return np.zeros(np.asarray(points).reshape(-1, 2).shape[0])
-        return self.__pore_water.excess_pressure(np.asarray(points, dtype=np.float64).reshape(-1, 2))
+            return np.zeros(np.asarray(points).reshape(-1, d).shape[0])
+        return self.__pore_water.excess_pressure(np.asarray(points, dtype=np.float64).reshape(-1, d))
 
     # ------------------------------------------------------------------ #
     #  Force evaluation                                                  #
@@ -445,8 +468,8 @@ class DEMSimulation:
             self.porosity = fluid.porosity
         else:
             self.__drag_coefficient = np.zeros(self.n)
-            self.__water_velocity = np.zeros((self.n, 2))
-            self.fluid_force = np.zeros((self.n, 2))
+            self.__water_velocity = np.zeros((self.n, self.dimension))
+            self.fluid_force = np.zeros((self.n, self.dimension))
             self.porosity = np.full(self.n, np.nan)
         self.edge_forces[:] = 0.0
         for platen in self.platens:
@@ -481,14 +504,15 @@ class DEMSimulation:
         i = first[contacts]
         j = second[contacts]
         dist = np.sqrt(dist_sq[contacts])
-        normal = np.tile([1.0, 0.0], (contacts.size, 1))
+        normal = np.zeros((contacts.size, self.dimension))
+        normal[:, 0] = 1.0
         # coincident centres have no defined normal, so they keep the arbitrary +x direction
         separated = dist > GEOMETRY_TOLERANCE * reach[contacts]
         normal[separated] = delta[contacts][separated] / dist[separated, None]
-        tangent = np.column_stack((-normal[:, 1], normal[:, 0]))
-        spin = self.radius[i] * self.omega[i] + self.radius[j] * self.omega[j]
-        relative_velocity = self.vel[i] - self.vel[j] - spin[:, None] * tangent
         radius_i, radius_j = self.radius[i], self.radius[j]
+        # the contact point of i moves with omega_i x (-R_i n), that of j with omega_j x (R_j n)
+        spin = scale(radius_i, self.omega[i]) + scale(radius_j, self.omega[j])
+        relative_velocity = self.vel[i] - self.vel[j] - spin_cross(spin, normal)
         mass_i, mass_j = self.mass[i], self.mass[j]
         effective_radius = radius_i * radius_j / (radius_i + radius_j)
         result = self.model.evaluate(normal, reach[contacts] - dist, relative_velocity, neighbours.spring[contacts],
@@ -497,11 +521,10 @@ class DEMSimulation:
 
         n = self.n
         force = result.force
-        self.force[:, 0] += np.bincount(i, force[:, 0], n) - np.bincount(j, force[:, 0], n)
-        self.force[:, 1] += np.bincount(i, force[:, 1], n) - np.bincount(j, force[:, 1], n)
+        self.force += scatter_add(i, force, n) - scatter_add(j, force, n)
         # both bodies receive a torque of the same sign, like two meshing gears
-        cross = normal[:, 0] * result.tangential_force[:, 1] - normal[:, 1] * result.tangential_force[:, 0]
-        self.torque -= np.bincount(i, radius_i * cross, n) + np.bincount(j, radius_j * cross, n)
+        lever = cross(normal, result.tangential_force)
+        self.torque -= scatter_add(i, scale(radius_i, lever), n) + scatter_add(j, scale(radius_j, lever), n)
 
         if self.model.rolling_friction > 0.0:
             # a particle rolls about its contact point, so its inertia there is I + m R^2
@@ -510,104 +533,106 @@ class DEMSimulation:
             rolling = self.model.rolling(result, self.omega[i] - self.omega[j], neighbours.rolling[contacts], increment,
                                          effective_radius, inertia_i * inertia_j / (inertia_i + inertia_j))
             neighbours.rolling[contacts] = rolling.rolling_spring
-            self.torque += np.bincount(i, rolling.moment, n) - np.bincount(j, rolling.moment, n)
+            self.torque += scatter_add(i, rolling.moment, n) - scatter_add(j, rolling.moment, n)
 
-    def __segment_state(self) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-        """Return the current start points, end points and velocities of the solid edges."""
-        starts = self.__segment_starts.copy()
-        ends = self.__segment_ends.copy()
-        velocities = np.zeros_like(starts)
-        for segments, platen in zip(self.__platen_segment_groups, self.platens):
-            starts[segments] = platen.starts
-            ends[segments] = platen.ends
+    def __solid_state(self) -> Tuple[FacetSet, npt.NDArray[np.float64]]:
+        """Return the solid facets at their current position and their velocities, shape (facets, d) [m/s]."""
+        shifts = np.zeros((self.__solid.count, self.dimension))
+        velocities = np.zeros_like(shifts)
+        for slots, platen in zip(self.__platen_slot_groups, self.platens):
+            shifts[slots] = platen.shift
             if platen.active:
-                velocities[segments] = platen.velocity * platen.direction
-        return starts, ends, velocities
+                velocities[slots] = platen.velocity * platen.direction
+        return self.__solid.moved(shifts), velocities
 
-    def __redundant_vertex_contacts(self, t: npt.NDArray[np.float64], starts: npt.NDArray[np.float64],
-                                    ends: npt.NDArray[np.float64]) -> npt.NDArray[np.bool_]:
-        """Flag contacts with a vertex that another solid edge already accounts for.
+    def __redundant_contacts(self, particle: npt.NDArray[np.int64], facet: npt.NDArray[np.int64],
+                             offset: npt.NDArray[np.float64], facets: FacetSet) -> npt.NDArray[np.bool_]:
+        """Flag contacts at a point that another solid facet touching the same particle already accounts for.
 
-        A vertex shared by two solid edges belongs to both. If the closest point of one edge to a particle is the
-        shared vertex, the other edge either has a closer point of its own or reports the same vertex, so in both
-        cases the contact is already counted once by the other edge.
+        The closest point of a facet to a particle may lie on another solid facet as well, at a vertex or along an
+        edge they share. That other facet then has a closest point of its own that is at least as close: either a
+        different, closer point, which is where the particle really touches the boundary, or the same point, which
+        of all the facets that report it only the one with the lowest index keeps. Without this rule a particle
+        resting on a re-entrant corner, or on a floor made of several facets, would feel two contacts.
 
         Args:
-            t: segment parameter of the closest point of every edge to every particle, shape (n, s).
-            starts: current start points of the solid edges, shape (s, 2) [m].
-            ends: current end points of the solid edges, shape (s, 2) [m].
+            particle: particle of each contact, sorted.
+            facet: solid facet of each contact.
+            offset: vector from the closest point of the facet to the particle centre, shape (k, d) [m].
+            facets: the solid facets at their current position.
 
         Returns:
-            True for every (particle, edge) contact that must be ignored, shape (n, s).
+            True for every contact that must be ignored.
         """
-        previous = self.__previous_segment
-        has_previous = previous >= 0
-        shares_start = np.zeros(starts.shape[0], dtype=bool)
-        gap = ends[previous[has_previous]] - starts[has_previous]
-        shares_start[has_previous] = np.hypot(gap[:, 0], gap[:, 1]) <= GEOMETRY_TOLERANCE * self.radius_range[1]
-        following = self.__next_segment
-        shares_end = np.zeros_like(shares_start)
-        shares_end[following >= 0] = shares_start[following[following >= 0]]
-
-        # a start vertex is always left to the previous edge, which reports it too or has a closer point
-        redundant = (t <= VERTEX_TOLERANCE) & shares_start[None, :]
-        # an end vertex is kept only if the next edge reports that same vertex as its closest point
-        next_t = t[:, np.maximum(following, 0)]
-        redundant |= (t >= 1.0 - VERTEX_TOLERANCE) & shares_end[None, :] & (next_t > VERTEX_TOLERANCE)
+        redundant = np.zeros(particle.size, dtype=bool)
+        firsts, seconds = [], []
+        # contacts are sorted by particle, so the contacts of one particle are adjacent
+        for lag in range(1, particle.size):
+            index = np.arange(particle.size - lag)
+            same = particle[index] == particle[index + lag]
+            if not np.any(same):
+                break
+            firsts.append(index[same])
+            seconds.append(index[same] + lag)
+        if not firsts:
+            return redundant
+        a = np.concatenate(firsts + seconds)
+        b = np.concatenate(seconds + firsts)
+        points = self.pos[particle] - offset
+        tolerance = GEOMETRY_TOLERANCE * self.radius_range[1]
+        on_other = norm(facets.pair_offsets(points[a], facet[b])) <= tolerance
+        distinct = norm(points[b] - points[a]) > tolerance
+        covered = on_other & (distinct | (facet[b] < facet[a]))
+        redundant[a[covered]] = True
         return redundant
 
     def __boundary_contacts(self, increment: float) -> None:
-        """Add the contact forces between the particles and the solid edges, and the reactions on the platens.
+        """Add the contact forces between the particles and the solid facets, and the reactions on the platens.
 
         Args:
             increment: time over which the sliding and rolling velocities are accumulated into the springs [s].
         """
-        if self.__segment_starts.shape[0] == 0:
+        if self.__solid.count == 0:
             return
-        starts, ends, velocities = self.__segment_state()
-        t, offset = project_onto_segments(self.pos, starts, ends)
-        dist_sq = offset[..., 0]**2 + offset[..., 1]**2
-        touching = dist_sq < (self.radius**2)[:, None]
-        touching &= ~self.__redundant_vertex_contacts(t, starts, ends)
+        facets, velocities = self.__solid_state()
+        particle, facet, offset, dist_sq = facets.touching(self.pos, self.radius)
+        keep = ~self.__redundant_contacts(particle, facet, offset, facets)
+        particle, facet, offset, dist_sq = particle[keep], facet[keep], offset[keep], dist_sq[keep]
+        touching = np.zeros((self.n, facets.count), dtype=bool)
+        touching[particle, facet] = True
         self.__wall_spring[~touching] = 0.0
         self.__wall_rolling[~touching] = 0.0
-        if not np.any(touching):
+        if particle.size == 0:
             return
 
-        particle, segment = np.nonzero(touching)
-        dist = np.sqrt(dist_sq[particle, segment])
+        dist = np.sqrt(dist_sq)
         radius = self.radius[particle]
-        # a centre exactly on the edge has no defined normal, so it is pushed along the inward normal
-        normal = self.__segment_normals[segment].copy()
+        # a centre exactly on the facet has no defined normal, so it is pushed along the inward normal
+        normal = self.__solid_normals[facet].copy()
         separated = dist > GEOMETRY_TOLERANCE * radius
-        normal[separated] = offset[particle[separated], segment[separated]] / dist[separated, None]
-        tangent = np.column_stack((-normal[:, 1], normal[:, 0]))
-        relative_velocity = (self.vel[particle] - velocities[segment] -
-                             (radius * self.omega[particle])[:, None] * tangent)
+        normal[separated] = offset[separated] / dist[separated, None]
+        relative_velocity = (self.vel[particle] - velocities[facet] -
+                             spin_cross(scale(radius, self.omega[particle]), normal))
         # a wall is a body of infinite radius and mass, so R* and m* reduce to the particle's
-        result = self.model.evaluate(normal, radius - dist, relative_velocity, self.__wall_spring[particle, segment],
-                                     increment, radius, self.mass[particle], self.__segment_friction[segment])
-        self.__wall_spring[particle, segment] = result.tangential_spring
+        result = self.model.evaluate(normal, radius - dist, relative_velocity, self.__wall_spring[particle, facet],
+                                     increment, radius, self.mass[particle], self.__solid_friction[facet])
+        self.__wall_spring[particle, facet] = result.tangential_spring
 
         n = self.n
         force = result.force
-        self.force[:, 0] += np.bincount(particle, force[:, 0], n)
-        self.force[:, 1] += np.bincount(particle, force[:, 1], n)
-        cross = normal[:, 0] * result.tangential_force[:, 1] - normal[:, 1] * result.tangential_force[:, 0]
-        self.torque -= np.bincount(particle, radius * cross, n)
+        self.force += scatter_add(particle, force, n)
+        self.torque -= scatter_add(particle, scale(radius, cross(normal, result.tangential_force)), n)
         if self.model.rolling_friction > 0.0:
-            # edges never rotate, so the relative spin is the particle's own
-            rolling = self.model.rolling(result, self.omega[particle], self.__wall_rolling[particle, segment],
-                                         increment, radius, self.inertia[particle] + self.mass[particle] * radius**2)
-            self.__wall_rolling[particle, segment] = rolling.rolling_spring
-            self.torque += np.bincount(particle, rolling.moment, n)
-        # the particles push each edge with the opposite of the force it exerts on them
-        segments = self.__segment_edge.size
-        self.edge_forces[self.__segment_edge, 0] = -np.bincount(segment, force[:, 0], segments)
-        self.edge_forces[self.__segment_edge, 1] = -np.bincount(segment, force[:, 1], segments)
+            # facets never rotate, so the relative spin is the particle's own
+            rolling = self.model.rolling(result, self.omega[particle], self.__wall_rolling[particle, facet], increment,
+                                         radius, self.inertia[particle] + self.mass[particle] * radius**2)
+            self.__wall_rolling[particle, facet] = rolling.rolling_spring
+            self.torque += scatter_add(particle, rolling.moment, n)
+        # the particles push each facet with the opposite of the force it exerts on them
+        self.edge_forces[self.__solid_index] = -scatter_add(facet, force, self.__solid_index.size)
 
         if self.platens:
-            platen = self.__platen_of_segment[segment]
+            platen = self.__platen_of_slot[facet]
             on_platen = platen >= 0
             if np.any(on_platen):
                 directions = np.array([p.direction for p in self.platens])
@@ -643,7 +668,7 @@ class DEMSimulation:
 
         # first half kick, with the forces of the previous evaluation
         self.__kick(half)
-        self.omega += half * self.torque * self.inv_inertia
+        self.omega += scale(self.inv_inertia, half * self.torque)
         for platen in active:
             platen.velocity += half * platen.acceleration(self.load_time, self.__gravity)
 
@@ -655,14 +680,14 @@ class DEMSimulation:
         self.steps_taken += 1
         if active:
             self.load_time += dt
-        if self.__has_open_edges and self.steps_taken % ESCAPE_CHECK_INTERVAL == 0:
+        if self.__has_open_facets and self.steps_taken % ESCAPE_CHECK_INTERVAL == 0:
             self.__remove_escaped_particles()
 
         self.__evaluate_forces(accumulate=True)
 
         # second half kick, with the new forces
         self.__kick(half)
-        self.omega += half * self.torque * self.inv_inertia
+        self.omega += scale(self.inv_inertia, half * self.torque)
         for platen in active:
             platen.velocity += half * platen.acceleration(self.load_time, self.__gravity)
 
@@ -679,7 +704,7 @@ class DEMSimulation:
     def bed_top(self) -> float:
         """Highest point of any particle [m]."""
         if self.n == 0:
-            return self.geometry.bounding_box[1]
+            return float(self.geometry.bounds[0][1])
         return float(np.max(self.pos[:, 1] + self.radius))
 
     def __record_frame(self, phase: str) -> None:
@@ -688,8 +713,8 @@ class DEMSimulation:
         Args:
             phase: name of the current stage.
         """
-        speeds = np.hypot(self.vel[:, 0], self.vel[:, 1])
-        platens = tuple(np.stack((p.starts, p.ends), axis=1) for p in self.platens)
+        speeds = norm(self.vel)
+        platens = tuple(p.vertices for p in self.platens)
         level = evaluate_at(self.water.level, self.time) if self.water is not None else None
         self.frames.append(Frame(self.time, self.pos.copy(), self.radius.copy(), speeds, platens, phase, level))
 
@@ -740,8 +765,8 @@ class DEMSimulation:
         rain = settings or RainSettings()
         rng = np.random.default_rng(rain.seed)
         r_min, r_max = self.radius_range
-        band = rain.insertion_band or (self.geometry.bounding_box[3] - 2.0 * r_max,
-                                       self.geometry.bounding_box[3] - r_max)
+        top = float(self.geometry.bounds[1][1])
+        band = rain.insertion_band or (top - 2.0 * r_max, top - r_max)
         pending: List[float] = []
         empty_waves = 0
         steps = 0
@@ -784,29 +809,31 @@ class DEMSimulation:
             The centres and radii of the placed particles, and the radii that could not be placed.
         """
         y_low, y_high = band
-        x_min, _, x_max, _ = self.geometry.bounding_box
+        low, high = self.geometry.bounds
         r_max = self.radius_range[1]
+        # the band is horizontal: x, and z in 3D, are drawn across the whole domain
+        horizontal = [0] if self.dimension == 2 else [0, 2]
         # only particles whose centre is this close to the band can overlap a new particle
         nearby = self.pos[:, 1] > y_low - 2.0 * r_max
         others = self.pos[nearby]
         other_radii = self.radius[nearby]
-        starts, ends, _ = self.__segment_state()
-        moved = self.__platen_segments
+        facets, _ = self.__solid_state()
+        moved = facets.select(self.__platen_slots)
 
-        placed: List[Tuple[float, float, float]] = []
+        placed: List[Tuple[float, ...]] = []
         unplaced: List[float] = []
         for radius in sorted(radii, reverse=True):
-            if x_max - x_min <= 2.0 * radius:
+            if any(high[k] - low[k] <= 2.0 * radius for k in horizontal):
                 unplaced.append(radius)
                 continue
-            xs = rng.uniform(x_min + radius, x_max - radius, attempts)
-            ys = rng.uniform(y_low, y_high, attempts)
-            candidates = np.column_stack((xs, ys))
+            columns = [rng.uniform(low[0] + radius, high[0] - radius, attempts), rng.uniform(y_low, y_high, attempts)]
+            if self.dimension == 3:
+                columns.append(rng.uniform(low[2] + radius, high[2] - radius, attempts))
+            candidates = np.column_stack(columns)
             fits = self.geometry.contains(candidates)
-            fits &= self.geometry.distance_to_edges(candidates).min(axis=1) >= radius
-            if moved.size:
-                _, offset = project_onto_segments(candidates, starts[moved], ends[moved])
-                fits &= np.hypot(offset[..., 0], offset[..., 1]).min(axis=1) >= radius
+            fits &= self.geometry.distance_to_facets(candidates).min(axis=1) >= radius
+            if moved.count:
+                fits &= moved.distances(candidates).min(axis=1) >= radius
             if others.shape[0]:
                 delta = candidates[:, None, :] - others[None, :, :]
                 fits &= ~np.any(np.einsum("ijk,ijk->ij", delta, delta) < (other_radii + radius)**2, axis=1)
@@ -814,13 +841,13 @@ class DEMSimulation:
             if found.size == 0:
                 unplaced.append(radius)
                 continue
-            x, y = candidates[found[0]]
-            placed.append((float(x), float(y), radius))
-            others = np.vstack((others, [[x, y]]))
+            centre = candidates[found[0]]
+            placed.append((*(float(c) for c in centre), radius))
+            others = np.vstack((others, centre[None, :]))
             other_radii = np.append(other_radii, radius)
 
-        table = np.array(placed, dtype=np.float64).reshape(-1, 3)
-        return table[:, :2].copy(), table[:, 2].copy(), unplaced
+        table = np.array(placed, dtype=np.float64).reshape(-1, self.dimension + 1)
+        return table[:, :-1].copy(), table[:, -1].copy(), unplaced
 
     def rest(self, duration: float, record_every: int = 60, phase: str = "settling") -> None:
         """Advance the simulation for a given time without changing the load, e.g. to let the packing relax.
@@ -853,7 +880,7 @@ class DEMSimulation:
             ValueError: if loading has already started.
         """
         if not self.platens:
-            raise ValueError("The geometry has no LoadedPlaten edge to seat.")
+            raise ValueError(f"The geometry has no LoadedPlaten {self.geometry.facet_name} to seat.")
         if any(p.active for p in self.platens):
             raise ValueError("Loading has already started; a released platen cannot be seated again.")
         for platen in self.platens:
@@ -877,7 +904,7 @@ class DEMSimulation:
             ValueError: if record_every is not positive.
         """
         if not self.platens:
-            raise ValueError("The geometry has no LoadedPlaten edge to apply a load with.")
+            raise ValueError(f"The geometry has no LoadedPlaten {self.geometry.facet_name} to apply a load with.")
         steps = self.__steps_for(duration)
         _check_record_every(record_every)
         if not any(p.active for p in self.platens):
@@ -909,6 +936,9 @@ class DEMSimulation:
         if duration < 0.0:
             raise ValueError(f"duration must be non-negative, got {duration}.")
         return int(round(duration / self.dt))
+
+
+_DIMENSION_NAMES = {2: "two-dimensional", 3: "three-dimensional"}
 
 
 def _check_record_every(record_every: int) -> None:

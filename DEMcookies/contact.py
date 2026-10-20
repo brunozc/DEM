@@ -1,4 +1,4 @@
-"""Hertz-Mindlin (no-slip) contact model for the DEMcookies 2D DEM.
+"""Hertz-Mindlin (no-slip) contact model for the DEMcookies DEM, in two and in three dimensions.
 
 The model follows the classic non-linear formulation used in most DEM codes (e.g. LIGGGHTS / EDEM):
 
@@ -8,6 +8,10 @@ The model follows the classic non-linear formulation used in most DEM codes (e.g
 * Coulomb limit: |F_t| <= mu F_n (sliding friction);
 * optional rolling resistance: an elastic-plastic spring with a dashpot between the rotations of the two bodies,
   limited to |M_r| <= mu_r R* F_n (the EPSD, or type C, model of Ai et al., 2011).
+
+Vectors have two components in 2D and three in 3D. Rotations are scalars in 2D, about the out-of-plane axis, and
+vectors in 3D, where only the rolling part of the relative rotation, about an axis in the contact plane, is resisted;
+twisting about the contact normal is free.
 
 Rolling resistance stands in for the shape of the grains. Round particles roll past each other far too easily, so a
 packing of discs or spheres is much weaker than one of angular grains such as railway ballast; resisting the relative
@@ -26,6 +30,7 @@ import numpy as np
 import numpy.typing as npt
 
 from .globals import DAMPING_CONSTANT, MIN_RESTITUTION, RAYLEIGH_OFFSET, RAYLEIGH_POISSON_COEFFICIENT
+from .vectors import norm
 
 
 @dataclass(frozen=True)
@@ -110,12 +115,13 @@ class ContactForces:
     """Result of evaluating a batch of contacts.
 
     Attributes:
-        force: total contact force on body i, shape (k, 2) [N].
-        tangential_force: tangential part of the force, used for the torque, shape (k, 2) [N].
-        tangential_spring: updated tangential displacement of each contact, shape (k, 2) [m].
+        force: total contact force on body i, shape (k, d) [N].
+        tangential_force: tangential part of the force, used for the torque, shape (k, d) [N].
+        tangential_spring: updated tangential displacement of each contact, shape (k, d) [m].
         normal_force: magnitude of the normal force, shape (k,) [N].
         normal_stiffness: tangent normal stiffness S_n = 2 E* a of each contact, zero when it is open, shape (k,)
             [N/m].
+        normal: unit normal of each contact, pointing from body j towards body i, shape (k, d).
     """
 
     force: npt.NDArray[np.float64]
@@ -123,6 +129,7 @@ class ContactForces:
     tangential_spring: npt.NDArray[np.float64]
     normal_force: npt.NDArray[np.float64]
     normal_stiffness: npt.NDArray[np.float64]
+    normal: npt.NDArray[np.float64]
 
 
 @dataclass(frozen=True, eq=False)
@@ -130,8 +137,8 @@ class RollingMoments:
     """Result of evaluating the rolling resistance of a batch of contacts.
 
     Attributes:
-        moment: rolling moment on body i; body j receives the opposite, shape (k,) [N m].
-        rolling_spring: updated relative rotation stored in each contact, shape (k,) [rad].
+        moment: rolling moment on body i; body j receives the opposite, shape (k,) in 2D or (k, 3) in 3D [N m].
+        rolling_spring: updated relative rotation stored in each contact, of the shape of the moment [rad].
     """
 
     moment: npt.NDArray[np.float64]
@@ -177,10 +184,10 @@ class HertzMindlinModel:
         """Evaluate a batch of k contacts between bodies i and j.
 
         Args:
-            normal: unit normals pointing from body j towards body i, shape (k, 2).
+            normal: unit normals pointing from body j towards body i, shape (k, d).
             overlap: normal overlaps, positive in contact, shape (k,) [m].
-            relative_velocity: velocity of the contact point of i relative to j, shape (k, 2) [m/s].
-            tangential_spring: stored tangential displacements, shape (k, 2) [m].
+            relative_velocity: velocity of the contact point of i relative to j, shape (k, d) [m/s].
+            tangential_spring: stored tangential displacements, shape (k, d) [m].
             time_step: increment over which the relative velocity is accumulated into the spring; zero re-evaluates
                 the forces of the current state without advancing the history [s].
             effective_radius: effective radii R*, shape (k,) [m].
@@ -210,7 +217,7 @@ class HertzMindlinModel:
         spring = spring + v_t * time_step
 
         f_t = -s_t[:, None] * spring - (damping * np.sqrt(s_t * effective_mass))[:, None] * v_t
-        f_t_magnitude = np.hypot(f_t[:, 0], f_t[:, 1])
+        f_t_magnitude = norm(f_t)
         f_t_limit = mu * f_n
         sliding = f_t_magnitude > f_t_limit
         if np.any(sliding):
@@ -225,7 +232,8 @@ class HertzMindlinModel:
                              tangential_force=f_t,
                              tangential_spring=spring,
                              normal_force=f_n,
-                             normal_stiffness=np.where(in_contact, s_n, 0.0))
+                             normal_stiffness=np.where(in_contact, s_n, 0.0),
+                             normal=normal)
 
     def rolling(self, contact: ContactForces, relative_spin: npt.NDArray[np.float64],
                 rolling_spring: npt.NDArray[np.float64], time_step: float, effective_radius: npt.NDArray[np.float64],
@@ -235,12 +243,15 @@ class HertzMindlinModel:
         The relative rotation of the two bodies is stored in a spring of stiffness k_r = 2.25 mu_r^2 R*^2 S_n, damped
         like the other springs of the contact law, and its moment is capped at mu_r R* F_n. A capped spring is reset
         to the moment it carries, so the contact rolls plastically and, when the rotation reverses, unloads
-        elastically (Ai et al., 2011).
+        elastically (Ai et al., 2011). In 3D the spin and the spring are vectors: only their components in the
+        contact plane, which roll the bodies over each other, are kept, the spring is projected onto the current
+        contact plane as the tangential spring is, and the magnitude of the moment is capped.
 
         Args:
             contact: forces of the same contacts, from ``evaluate``.
-            relative_spin: angular velocity of body i minus that of body j, shape (k,) [rad/s].
-            rolling_spring: stored relative rotations, shape (k,) [rad].
+            relative_spin: angular velocity of body i minus that of body j, shape (k,) in 2D or (k, 3) in 3D
+                [rad/s].
+            rolling_spring: stored relative rotations, of the shape of the spin [rad].
             time_step: increment over which the relative spin is accumulated into the spring; zero re-evaluates the
                 moments of the current state without advancing the history [s].
             effective_radius: effective radii R*, shape (k,) [m].
@@ -253,15 +264,50 @@ class HertzMindlinModel:
         """
         mu_r = self.rolling_friction
         stiffness = 2.25 * mu_r * mu_r * effective_radius * effective_radius * contact.normal_stiffness
-        spring = rolling_spring + relative_spin * time_step
         damping = DAMPING_CONSTANT * self.beta * np.sqrt(stiffness * rolling_inertia)
+        limit = mu_r * effective_radius * contact.normal_force
+        if relative_spin.ndim == 2:
+            return self.__rolling_3d(contact.normal, relative_spin, rolling_spring, time_step, stiffness, damping,
+                                     limit)
+        spring = rolling_spring + relative_spin * time_step
         moment = -stiffness * spring - damping * relative_spin
 
-        limit = mu_r * effective_radius * contact.normal_force
         rolling = np.abs(moment) > limit
         # an open contact, or a free one, has a zero stiffness and must not divide by it
         loaded = rolling & (stiffness > 0.0)
         moment[rolling] = np.sign(moment[rolling]) * limit[rolling]
         spring[loaded] = -moment[loaded] / stiffness[loaded]
+        spring[stiffness <= 0.0] = 0.0
+        return RollingMoments(moment=moment, rolling_spring=spring)
+
+    @staticmethod
+    def __rolling_3d(normal: npt.NDArray[np.float64], relative_spin: npt.NDArray[np.float64],
+                     rolling_spring: npt.NDArray[np.float64], time_step: float, stiffness: npt.NDArray[np.float64],
+                     damping: npt.NDArray[np.float64], limit: npt.NDArray[np.float64]) -> RollingMoments:
+        """Evaluate the rolling resistance of a batch of 3D contacts, with vector spins and springs.
+
+        Args:
+            normal: unit normals of the contacts, shape (k, 3).
+            relative_spin: angular velocity of body i minus that of body j, shape (k, 3) [rad/s].
+            rolling_spring: stored relative rotations, shape (k, 3) [rad].
+            time_step: increment over which the rolling spin is accumulated into the spring [s].
+            stiffness: rolling stiffness k_r of each contact [N m/rad].
+            damping: rolling damping coefficient of each contact [N m s/rad].
+            limit: largest rolling moment of each contact [N m].
+
+        Returns:
+            The rolling moments on body i and the updated springs.
+        """
+        # twisting about the normal is not resisted, so only the rolling part of the spin and of the spring is kept
+        spin = relative_spin - np.einsum("ij,ij->i", relative_spin, normal)[:, None] * normal
+        spring = rolling_spring - np.einsum("ij,ij->i", rolling_spring, normal)[:, None] * normal
+        spring = spring + spin * time_step
+        moment = -stiffness[:, None] * spring - damping[:, None] * spin
+
+        magnitude = norm(moment)
+        rolling = magnitude > limit
+        loaded = rolling & (stiffness > 0.0)
+        moment[rolling] *= (limit[rolling] / magnitude[rolling])[:, None]
+        spring[loaded] = -moment[loaded] / stiffness[loaded][:, None]
         spring[stiffness <= 0.0] = 0.0
         return RollingMoments(moment=moment, rolling_spring=spring)
