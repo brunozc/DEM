@@ -4,11 +4,12 @@
 \section{Purpose of this document}
 \label{sec:purpose}
 
-This manual documents \texttt{DEMcookies}, a compact two-dimensional Discrete
+This manual documents \texttt{DEMcookies}, a compact two- and three-dimensional Discrete
 Element Model (DEM) written in Python.  The code simulates an assembly of
 circular, polydisperse particles that are first deposited into a rectangular
 container under gravity (\emph{raining} deposition) and subsequently compressed
 by a rigid loading platen that transmits a prescribed, time-dependent force.
+Most of this manual describes the planar model, which Sections~\ref{sec:3d} and~\ref{sec:3d-numerics} extend to three dimensions.
 
 The document is intended to be self-contained: every equation that the code
 evaluates is stated explicitly, every numerical parameter is defined, and every
@@ -182,6 +183,15 @@ manual (Table~\ref{tab:modules}).
     \texttt{geometry.py} &
       \texttt{Geometry} (polygonal domain) &
       Section~\ref{sec:domain} \\
+    \texttt{geometry3d.py} &
+      \texttt{Geometry3D} (polyhedral domain) &
+      Section~\ref{sec:3d} \\
+    \texttt{facets.py} &
+      closest points, contacts and seating of edges and faces &
+      Sections~\ref{sec:coupling} and~\ref{sec:3d-numerics} \\
+    \texttt{vectors.py} &
+      vector operations shared by 2D and 3D &
+      Section~\ref{sec:3d-numerics} \\
     \texttt{boundary.py}, \texttt{segments.py} &
       \texttt{Wall}, \texttt{Open}, \texttt{LoadedPlaten}, \texttt{Platen} &
       Sections~\ref{sec:walls}--\ref{sec:platen} \\
@@ -196,7 +206,7 @@ manual (Table~\ref{tab:modules}).
       \texttt{Water}, buoyancy, drag, porosity grid, pore pressure &
       Sections~\ref{sec:water} and~\ref{sec:water-numerics} \\
     \texttt{particle\_generation.py} &
-      \texttt{Particle}, \texttt{generate\_lattice\_particles} &
+      \texttt{Particle}, \texttt{Particle3D}, \texttt{generate\_lattice\_particles} &
       Section~\ref{sec:deposition} \\
     \texttt{solver.py} &
       \texttt{VelocityVerlet}, \texttt{DEMSimulation}, \texttt{RainSettings} &
@@ -230,6 +240,7 @@ mind when interpreting results.
   \item \textbf{Two-dimensional kinematics.}  Motion is restricted to the
         $x$--$y$ plane.  Each particle has three degrees of freedom: two
         translations and one rotation about the out-of-plane axis.
+        In a polyhedral domain the particles move in space instead, with six degrees of freedom (Section~\ref{sec:3d}).
   \item \textbf{Spherical mass properties.}  Although the geometry is a disc,
         the mass and the moment of inertia are those of a \emph{sphere},
         $m=\tfrac{4}{3}\pi\rho R^{3}$ and $I=\tfrac{2}{5}mR^{2}$.  The model is
@@ -259,7 +270,7 @@ mind when interpreting results.
         fluid itself is not resolved: it has no inertia and no viscous stresses
         of its own (Section~\ref{sec:water}).
   \item \textbf{Rigid boundaries.}  Walls are perfectly rigid, straight
-        segments of infinite mass and infinite radius; a platen is rigid but has
+        segments (planar faces in 3D) of infinite mass and infinite radius; a platen is rigid but has
         a finite mass and one translational degree of freedom, along its
         direction of motion.
 \end{enumerate}
@@ -271,6 +282,7 @@ Vectors are set in bold, $\mathbf{a}=(a_{x},a_{y})$.  Because the model is
 planar, angular quantities are scalars measuring the out-of-plane
 ($z$) component, and the cross product of two in-plane vectors is the scalar
 $(\mathbf{a}\times\mathbf{b})_{z}=a_{x}b_{y}-a_{y}b_{x}$.
+In three dimensions (Section~\ref{sec:3d}) vectors have a third component, $a_{z}$, and angular quantities and cross products are vectors.
 Table~\ref{tab:notation} collects the symbols used throughout the manual.
 
 \begin{table}[htbp]

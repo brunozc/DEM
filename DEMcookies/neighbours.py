@@ -10,7 +10,8 @@ from typing import Tuple
 import numpy as np
 import numpy.typing as npt
 
-from .globals import HALF_STENCIL_OFFSETS, PAIR_KEY_SHIFT
+from .globals import HALF_STENCIL_OFFSETS, HALF_STENCIL_OFFSETS_3D, PAIR_KEY_SHIFT
+from .vectors import rotation_shape
 
 
 def pair_keys(first: npt.NDArray[np.int64], second: npt.NDArray[np.int64]) -> npt.NDArray[np.int64]:
@@ -30,12 +31,12 @@ def find_close_pairs(positions: npt.NDArray[np.float64], radii: npt.NDArray[np.f
                      skin: float) -> Tuple[npt.NDArray[np.int64], npt.NDArray[np.int64]]:
     """Find every pair of particles whose surfaces are less than ``skin`` apart.
 
-    Particles are binned into square cells of side ``2 R_max + skin``, so two close particles always sit in the same
-    or in adjacent cells. Each cell is compared with itself and with half of its neighbours, which visits every
-    unordered pair of cells exactly once.
+    Particles are binned into square (2D) or cubic (3D) cells of side ``2 R_max + skin``, so two close particles
+    always sit in the same or in adjacent cells. Each cell is compared with itself and with half of its neighbours,
+    which visits every unordered pair of cells exactly once.
 
     Args:
-        positions: particle centres, shape (n, 2) [m].
+        positions: particle centres, shape (n, d) [m].
         radii: particle radii, shape (n,) [m].
         skin: largest surface gap of a returned pair [m].
 
@@ -57,15 +58,24 @@ def find_close_pairs(positions: npt.NDArray[np.float64], radii: npt.NDArray[np.f
     cell = np.floor((positions - positions.min(axis=0)) / cell_size).astype(np.int64)
     # a padding column on each side keeps the -1 and +1 x offsets from wrapping into the neighbouring row
     n_columns = int(cell[:, 0].max()) + 3
-    cell_id = (cell[:, 0] + 1) + cell[:, 1] * n_columns
+    if positions.shape[1] == 2:
+        cell_id = (cell[:, 0] + 1) + cell[:, 1] * n_columns
+        strides = (1, n_columns, 0)
+        stencil = tuple((dx, dy, 0) for dx, dy in HALF_STENCIL_OFFSETS)
+    else:
+        # likewise a padding row on each side keeps the -1 and +1 y offsets within a layer of cells
+        n_rows = int(cell[:, 1].max()) + 3
+        cell_id = (cell[:, 0] + 1) + (cell[:, 1] + 1) * n_columns + cell[:, 2] * n_columns * n_rows
+        strides = (1, n_columns, n_columns * n_rows)
+        stencil = HALF_STENCIL_OFFSETS_3D
     order = np.argsort(cell_id, kind="stable")
     sorted_ids = cell_id[order]
     particle = np.arange(n, dtype=np.int64)
 
     firsts = []
     seconds = []
-    for dx, dy in HALF_STENCIL_OFFSETS:
-        target = cell_id + dx + dy * n_columns
+    for dx, dy, dz in stencil:
+        target = cell_id + dx * strides[0] + dy * strides[1] + dz * strides[2]
         begin = np.searchsorted(sorted_ids, target, side="left")
         count = np.searchsorted(sorted_ids, target, side="right") - begin
         total = int(count.sum())
@@ -75,7 +85,7 @@ def find_close_pairs(positions: npt.NDArray[np.float64], radii: npt.NDArray[np.f
         # position of each candidate within its target cell, i.e. 0..count-1 for every particle
         within = np.arange(total, dtype=np.int64) - np.repeat(np.cumsum(count) - count, count)
         second = order[np.repeat(begin, count) + within]
-        if dx == 0 and dy == 0:
+        if dx == 0 and dy == 0 and dz == 0:
             keep = first < second
             first, second = first[keep], second[keep]
         firsts.append(first)
@@ -98,24 +108,30 @@ def find_close_pairs(positions: npt.NDArray[np.float64], radii: npt.NDArray[np.f
 class NeighbourList:
     """Verlet list of candidate particle pairs, together with the tangential and rolling springs of each pair."""
 
-    def __init__(self, skin: float) -> None:
+    def __init__(self, skin: float, dimension: int = 2) -> None:
         """Create an empty list.
 
         Args:
             skin: distance added to the contact distance of a pair when the list is built [m].
+            dimension: number of space dimensions, 2 or 3, which sets the shape of the springs: the tangential
+                springs are vectors, the rolling springs scalars in 2D and vectors in 3D.
 
         Raises:
             ValueError: if the skin is negative.
+            ValueError: if the dimension is neither 2 nor 3.
         """
         if skin < 0.0:
             raise ValueError(f"skin must be non-negative, got {skin}.")
+        if dimension not in (2, 3):
+            raise ValueError(f"dimension must be 2 or 3, got {dimension}.")
         self.skin = skin
+        self.dimension = dimension
         self.first: npt.NDArray[np.int64] = np.zeros(0, dtype=np.int64)
         self.second: npt.NDArray[np.int64] = np.zeros(0, dtype=np.int64)
-        self.spring: npt.NDArray[np.float64] = np.zeros((0, 2))
-        self.rolling: npt.NDArray[np.float64] = np.zeros(0)
+        self.spring: npt.NDArray[np.float64] = np.zeros((0, dimension))
+        self.rolling: npt.NDArray[np.float64] = np.zeros(rotation_shape(0, dimension))
         self.builds = 0
-        self.__reference: npt.NDArray[np.float64] = np.zeros((0, 2))
+        self.__reference: npt.NDArray[np.float64] = np.zeros((0, dimension))
         self.__valid = False
 
     def invalidate(self) -> None:
@@ -126,7 +142,7 @@ class NeighbourList:
         """Rebuild the list if it may have missed a contact.
 
         Args:
-            positions: particle centres, shape (n, 2) [m].
+            positions: particle centres, shape (n, d) [m].
             radii: particle radii, shape (n,) [m].
         """
         if self.__valid and positions.shape == self.__reference.shape:
@@ -156,12 +172,12 @@ class NeighbourList:
         """Rebuild the list and carry the springs of surviving pairs over.
 
         Args:
-            positions: particle centres, shape (n, 2) [m].
+            positions: particle centres, shape (n, d) [m].
             radii: particle radii, shape (n,) [m].
         """
         first, second = find_close_pairs(positions, radii, self.skin)
-        spring = np.zeros((first.size, 2))
-        rolling = np.zeros(first.size)
+        spring = np.zeros((first.size, self.dimension))
+        rolling = np.zeros(rotation_shape(first.size, self.dimension))
         if self.first.size and first.size:
             old_keys = pair_keys(self.first, self.second)
             new_keys = pair_keys(first, second)

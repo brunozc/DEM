@@ -214,3 +214,84 @@ class TestRollingResistance:
         model = HertzMindlinModel(_material(restitution=0.4, rolling_friction=0.3))
         _, moments = _rolling(model, 1.0e-4, 1.0e-3, 2.0e-5, dt=0.0)
         assert_allclose(moments.rolling_spring, [2.0e-5], rtol=1e-12)
+
+
+def _rolling_3d(model: HertzMindlinModel,
+                normal: Tuple[float, float, float],
+                spin: Tuple[float, float, float],
+                stored: Tuple[float, float, float],
+                overlap: float = 1.0e-4,
+                dt: float = 1.0e-5) -> Tuple[ContactForces, RollingMoments]:
+    """Evaluate the forces and the rolling moment of one 3D contact between two 10 mm particles at rest."""
+    contact = model.evaluate(np.array([normal], dtype=float), np.array([overlap]), np.zeros((1, 3)), np.zeros((1, 3)),
+                             dt, np.array([0.005]), np.array([1.0]))
+    moments = model.rolling(contact, np.array([spin], dtype=float), np.array([stored], dtype=float), dt,
+                            np.array([0.005]), np.array([1.0e-6]))
+    return contact, moments
+
+
+class TestHertzMindlinModel3D:
+    """Tests of the Hertz-Mindlin contact law with 3D vectors."""
+
+    def test_force_and_normal_of_a_3d_contact(self) -> None:
+        """The normal force must follow Hertz along an oblique normal, which the result carries along."""
+        model = HertzMindlinModel(_material(restitution=1.0))
+        normal = np.array([[2.0, -1.0, 2.0]]) / 3.0
+        result = model.evaluate(normal, np.array([1.0e-4]), np.zeros((1, 3)), np.zeros((1, 3)), 1.0e-5,
+                                np.array([0.005]), np.array([1.0]))
+        expected = (4.0 / 3.0) * model.e_star * math.sqrt(0.005) * 1.0e-4**1.5
+        assert_allclose(result.force, expected * normal, rtol=1e-12)
+        assert_allclose(result.normal, normal)
+
+    def test_coulomb_friction_limit_in_3d(self) -> None:
+        """Fast oblique sliding must give a tangential force of exactly mu F_n against the sliding direction."""
+        mu = 0.5
+        model = HertzMindlinModel(_material(restitution=1.0, friction=mu))
+        result = model.evaluate(np.array([[0.0, 1.0, 0.0]]), np.array([1.0e-4]), np.array([[3.0, 0.0, -4.0]]),
+                                np.zeros((1, 3)), 1.0e-5, np.array([0.005]), np.array([1.0]))
+        f_n = (4.0 / 3.0) * model.e_star * math.sqrt(0.005) * 1.0e-4**1.5
+        assert_allclose(result.tangential_force, [[-0.6 * mu * f_n, 0.0, 0.8 * mu * f_n]], rtol=1e-9, atol=1e-18)
+
+
+class TestRollingResistance3D:
+    """Tests of the rolling resistance with vector spins and springs."""
+
+    @pytest.mark.parametrize("spin, stored", [(0.0, 1.0e-4), (50.0, 0.0), (-50.0, 2.0e-5)])
+    def test_reduces_to_planar_model(self, spin: float, stored: float) -> None:
+        """A rotation about z at a contact whose normal lies in the x-y plane must give the moment of the 2D model."""
+        model = HertzMindlinModel(_material(restitution=0.4, rolling_friction=0.3))
+        _, planar = _rolling(model, 1.0e-4, spin, stored)
+        _, spatial = _rolling_3d(model, (0.0, 1.0, 0.0), (0.0, 0.0, spin), (0.0, 0.0, stored))
+        assert_allclose(spatial.moment, [[0.0, 0.0, planar.moment[0]]], rtol=1e-12, atol=1e-30)
+        assert_allclose(spatial.rolling_spring, [[0.0, 0.0, planar.rolling_spring[0]]], rtol=1e-12, atol=1e-30)
+
+    def test_twisting_is_free(self) -> None:
+        """A spin about the contact normal must neither load the rolling spring nor meet a moment."""
+        model = HertzMindlinModel(_material(restitution=0.4, rolling_friction=0.3))
+        _, moments = _rolling_3d(model, (0.0, 1.0, 0.0), (0.0, 50.0, 0.0), (0.0, 0.0, 0.0))
+        assert_allclose(moments.moment, 0.0, atol=1e-30)
+        assert_allclose(moments.rolling_spring, 0.0, atol=1e-30)
+
+    def test_spring_is_projected_onto_contact_plane(self) -> None:
+        """A stored rotation must lose its component along the normal, as the tangential spring does."""
+        model = HertzMindlinModel(_material(restitution=1.0, rolling_friction=0.3))
+        contact, moments = _rolling_3d(model, (0.0, 1.0, 0.0), (0.0, 0.0, 0.0), (1.0e-4, 1.0e-4, 0.0), dt=0.0)
+        assert_allclose(moments.rolling_spring, [[1.0e-4, 0.0, 0.0]], atol=1e-20)
+        stiffness = 2.25 * 0.3**2 * 0.005**2 * contact.normal_stiffness[0]
+        assert_allclose(moments.moment, [[-stiffness * 1.0e-4, 0.0, 0.0]], rtol=1e-12)
+
+    def test_moment_is_capped_in_magnitude(self) -> None:
+        """A fast oblique rolling spin must mobilise the full rolling moment mu_r R* F_n against it."""
+        model = HertzMindlinModel(_material(restitution=0.4, rolling_friction=0.3))
+        contact, moments = _rolling_3d(model, (0.0, 1.0, 0.0), (30.0, 0.0, 40.0), (0.0, 0.0, 0.0))
+        limit = 0.3 * 0.005 * contact.normal_force[0]
+        assert_allclose(moments.moment, [[-0.6 * limit, 0.0, -0.8 * limit]], rtol=1e-9)
+        stiffness = 2.25 * 0.3**2 * 0.005**2 * contact.normal_stiffness[0]
+        assert_allclose(moments.rolling_spring, -moments.moment / stiffness, rtol=1e-12)
+
+    def test_open_contact_has_no_moment_and_no_history(self) -> None:
+        """A contact that opened must exert no moment and reset its rolling spring."""
+        model = HertzMindlinModel(_material(restitution=0.4, rolling_friction=0.3))
+        _, moments = _rolling_3d(model, (0.0, 1.0, 0.0), (5.0, 0.0, 5.0), (1.0e-3, 0.0, 0.0), overlap=-1.0e-5)
+        assert_allclose(moments.moment, 0.0, atol=1e-30)
+        assert_allclose(moments.rolling_spring, 0.0, atol=1e-30)

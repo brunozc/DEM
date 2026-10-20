@@ -17,11 +17,21 @@ MIN_RESTITUTION = 1.0e-4
 # Relative tolerance for geometric tests, scaled by the size of the domain.
 GEOMETRY_TOLERANCE = 1.0e-9
 
-# Tolerance on the segment parameter t in [0, 1] below which a contact point is taken to be the segment start vertex.
-VERTEX_TOLERANCE = 1.0e-9
+# Largest distance of a vertex of a face of a polyhedron from the plane of the face, relative to the size of the
+# domain. It is looser than the geometric tolerance, so that faces whose vertices were rounded on input are accepted.
+PLANARITY_TOLERANCE = 1.0e-6
 
 # Half of the eight neighbouring cells of the cell grid; together with the cell itself every pair is visited once.
 HALF_STENCIL_OFFSETS: Tuple[Tuple[int, int], ...] = ((0, 0), (1, 0), (-1, 1), (0, 1), (1, 1))
+
+# The same in 3D: half of the 26 neighbouring cells, the layer above the cell and the forward half of its own layer.
+HALF_STENCIL_OFFSETS_3D: Tuple[Tuple[int, int, int],
+                               ...] = ((0, 0, 0), (1, 0, 0), (-1, 1, 0), (0, 1, 0), (1, 1, 0), (-1, -1, 1), (0, -1, 1),
+                                       (1, -1, 1), (-1, 0, 1), (0, 0, 1), (1, 0, 1), (-1, 1, 1), (0, 1, 1), (1, 1, 1))
+
+# Largest number of point-edge pairs that a geometric query of the faces of a polyhedron handles at once, which
+# bounds the memory that queries over many points, such as the sampling of the domain, need.
+QUERY_CHUNK_SIZE = 200000
 
 # Bit shift used to pack a particle pair (i, j) into the single integer key (i << shift) | j.
 PAIR_KEY_SHIFT = 32

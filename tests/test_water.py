@@ -8,8 +8,8 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
-from DEMcookies import (DEMSimulation, Geometry, Heaviside, LoadedPlaten, MaterialProperties, Particle, TimeHistory,
-                        Wall, Water, generate_lattice_particles)
+from DEMcookies import (DEMSimulation, Domain, Geometry, Geometry3D, Heaviside, LoadedPlaten, MaterialProperties,
+                        Particle, Particle3D, TimeHistory, Wall, Water, generate_lattice_particles)
 from DEMcookies.water import PorePressure, PorosityField, drag_force, porosity_3d, submerged_fraction
 
 
@@ -356,3 +356,110 @@ class TestPorePressure:
                             particles=[Particle(0.05, 0.01, 0.01)],
                             water=Water(level=0.08))
         assert_allclose(sim.excess_pore_pressure(np.array([[0.05, 0.01], [0.02, 0.02]])), 0.0, atol=1e-18)
+
+
+class TestWater3D:
+    """Tests of the pore water in a 3D domain."""
+
+    def test_submerged_particle_rests_on_buoyant_weight(self) -> None:
+        """Under water a resting particle must press on the floor face with its buoyant weight only."""
+        sim = DEMSimulation(Geometry3D.box(0.1, 0.1, 0.1),
+                            _material(),
+                            particles=[Particle3D(0.05, 0.01, 0.05, 0.01)],
+                            water=Water(level=0.08))
+        sim.rest(0.5)
+        expected = _hertz_overlap((2500.0 - 1000.0) * _volume(0.01) * 9.81, 0.01)
+        assert_allclose(0.01 - sim.pos[0, 1], expected, rtol=1e-3)
+
+    def test_terminal_settling_velocity(self) -> None:
+        """A sphere settling in still water must fall straight at the speed at which drag balances its weight."""
+        radius = 0.005
+        sim = DEMSimulation(Geometry3D.box(0.4, 2.0, 0.4),
+                            _material(),
+                            particles=[Particle3D(0.2, 1.9, 0.2, radius)],
+                            water=Water(level=2.0, cell_size=0.4))
+        sim.rest(0.8)
+        weight = (2500.0 - 1000.0) * _volume(radius) * 9.81
+        expected = _solve(lambda speed: _vertical_drag(speed, radius, float(sim.porosity[0])), weight)
+        assert_allclose(-sim.vel[0, 1], expected, rtol=1e-4)
+        assert_allclose(sim.vel[0, [0, 2]], 0.0, atol=1e-15)
+
+    def test_simple_cubic_lattice_porosity(self) -> None:
+        """A cubic lattice of touching spheres must have porosity 1 - pi/6 everywhere, also next to the walls."""
+        radius = 0.005
+        axis = np.arange(radius, 0.2, 2.0 * radius)
+        positions = np.array([(x, y, z) for x in axis for y in axis for z in axis])
+        field = PorosityField(Geometry3D.box(0.2, 0.2, 0.2), 0.04)
+        assert field.shape == (8, 8, 8)
+        assert_allclose(field.measured_porosity(positions, np.full(len(positions), radius)), 1.0 - math.pi / 6.0)
+        # spheres need no conversion from the porosity of a layer of discs
+        assert_allclose(field.volume_porosity(np.array([0.3, 1.2])), [0.3, 1.0])
+        with pytest.raises(ValueError, match=re.escape("A 3D domain has no disc layer")):
+            field.porosity_2d(positions, np.full(len(positions), radius))
+
+    def test_pressure_diffusion_follows_terzaghi(self) -> None:
+        """A uniform excess pressure in a column drained at the top must dissipate as Terzaghi's solution."""
+        cell, height = 0.05, 0.5
+        geometry = Geometry3D.box(0.1, 1.0, 0.1)
+        field = PorosityField(geometry, cell)
+        pressure = PorePressure(field, geometry)
+        nodes = field.node_positions
+        porosity, mobility, stiffness = np.full(len(nodes), 0.4), np.full(len(nodes), 1.0e-6), 1.0e6
+        diffusivity = mobility[0] * stiffness / porosity[0]
+        level = height - 0.25 * cell
+        pressure.pressure[:] = np.where((nodes[:, 1] < level) & (field.node_volume > 0.0), 1.0, 0.0)
+        centre = (np.abs(nodes[:, 0] - 0.05) < 1e-9) & (np.abs(nodes[:, 2] - 0.05) < 1e-9)
+        base = centre & (np.abs(nodes[:, 1]) < 1e-9)
+        middle = centre & (np.abs(nodes[:, 1] - 0.25) < 1e-9)
+        dt, time = 2.0e-5, 0.0
+        for target in (0.2, 0.5, 1.0):
+            while diffusivity * time / height**2 < target - 1e-12:
+                pressure.advance(dt, porosity, mobility, np.zeros((len(nodes), 3)), level, stiffness)
+                time += dt
+            factor = diffusivity * time / height**2
+            assert_allclose(pressure.pressure[base][0], _terzaghi(height, height, factor), atol=0.01)
+            assert_allclose(pressure.pressure[middle][0], _terzaghi(0.25, height, factor), atol=0.01)
+
+    @pytest.mark.parametrize("geometry", [Geometry.rectangle(0.1, 1.0), Geometry3D.box(0.1, 1.0, 0.1)])
+    def test_steady_drainage_of_carried_water(self, geometry: Domain) -> None:
+        """Water carried down onto an impermeable floor must drain back up through a linear pressure profile.
+
+        At steady state the Darcy flow returns the carried flux c, so p = c (y_d - y) / (k / mu) below the drained
+        node at y_d, whatever the cells cut by the walls.
+        """
+        cell, carried_speed, mobility = 0.05, 1.0e-3, 2.0e-6
+        field = PorosityField(geometry, cell)
+        pressure = PorePressure(field, geometry)
+        nodes = field.node_positions
+        carried = np.zeros((len(nodes), geometry.dimension))
+        carried[:, 1] = -carried_speed
+        level = 0.5 - 0.25 * cell
+        # a step much longer than the diffusion time reaches the steady state at once
+        pressure.advance(1.0e6, np.full(len(nodes), 0.4), np.full(len(nodes), mobility), carried, level, 1.0e6)
+        free = (field.node_volume > 0.0) & (nodes[:, 1] < level)
+        expected = carried_speed * (0.5 - nodes[free, 1]) / mobility
+        assert_allclose(pressure.pressure[free], expected, rtol=1e-6)
+
+    def test_coupling_shortens_the_default_time_step(self) -> None:
+        """A stiff pore fluid must shorten the default time step of a 3D simulation too."""
+        drained = DEMSimulation(Geometry3D.box(0.1, 0.1, 0.1),
+                                _material(),
+                                radius_range=(0.004, 0.006),
+                                water=Water(level=0.1))
+        coupled = DEMSimulation(Geometry3D.box(0.1, 0.1, 0.1),
+                                _material(),
+                                radius_range=(0.004, 0.006),
+                                water=Water(level=0.1, coupled=True, bulk_modulus=1.0e9))
+        assert coupled.dt < 0.5 * drained.dt
+
+    def test_coupled_water_resists_a_sudden_load(self) -> None:
+        """Under a fast load an excess pore pressure must build up below a 3D packing."""
+        geometry = Geometry3D.box(0.06, 0.12, 0.06, top=LoadedPlaten(load=Heaviside(5.0, rise_time=0.002), mass=0.2))
+        particles = generate_lattice_particles(geometry, 80, (0.004, 0.005), seed=1)
+        sim = DEMSimulation(geometry, _material(), particles=particles, water=Water(level=0.11))
+        sim.rest(0.15)
+        assert_allclose(sim.excess_pore_pressure(np.array([[0.03, 0.003, 0.03]])), 0.0, atol=1e-18)
+        sim.set_water(Water(level=0.11, coupled=True, viscosity=1.0, bulk_modulus=2.0e6))
+        sim.compress(0.008)
+        assert sim.excess_pore_pressure(np.array([[0.03, 0.003, 0.03]]))[0] > 10.0
+        assert sim.fluid_force.shape == (80, 3)

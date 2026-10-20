@@ -1,5 +1,6 @@
 """Tests of the polygonal domain, the boundary conditions and the platen state."""
 
+import math
 import re
 from typing import Optional, Tuple
 
@@ -7,7 +8,7 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
-from DEMcookies.boundary import LoadedPlaten, Open, Platen, Wall, resolve_direction
+from DEMcookies.boundary import LoadedPlaten, Open, Platen, Wall, resolve_body_direction, resolve_direction
 from DEMcookies.geometry import Geometry, project_onto_segments
 from DEMcookies.loads import Heaviside
 
@@ -204,3 +205,30 @@ class TestPlaten:
         assert_allclose(platen.acceleration(1.0, np.array([0.0, -9.81])), (2.0 - 0.5) / 0.5)
         heavy = self._top_platen(self_weight=True)
         assert_allclose(heavy.acceleration(1.0, np.array([0.0, -9.81])), (2.0 + 0.5 * 9.81) / 0.5)
+
+
+class TestLoadedPlatenDirection3D:
+    """Tests of the direction of a loaded body in three dimensions."""
+
+    def test_3d_direction_is_normalised(self) -> None:
+        """An explicit 3D direction is used as given, scaled to unit length."""
+        spec = LoadedPlaten(load=Heaviside(1.0), mass=1.0, direction=(0.0, -3.0, 4.0))
+        assert_allclose(resolve_body_direction(spec, np.ones(1), np.array([[0.0, -1.0, 0.0]])), [0.0, -0.6, 0.8])
+
+    @pytest.mark.parametrize("direction, kind", [
+        ((0.0, 0.0, 0.0), "(x, y, z)"),
+        ((0.0, math.inf, 1.0), "(x, y, z)"),
+        ((1.0, 0.0, 0.0, 0.0), "(x, y) or (x, y, z)"),
+    ])
+    def test_invalid_direction_is_rejected(self, direction: Tuple[float, ...], kind: str) -> None:
+        """A direction must be a finite, non-zero vector of two or three components."""
+        message = f"LoadedPlaten direction must be a finite, non-zero {kind} vector, got {direction}."
+        with pytest.raises(ValueError, match=re.escape(message)):
+            LoadedPlaten(load=Heaviside(1.0), mass=1.0, direction=direction)
+
+    def test_3d_direction_in_polygon_is_rejected(self) -> None:
+        """A loaded body of a polygon cannot move along a 3D direction."""
+        platen = LoadedPlaten(load=Heaviside(1.0), mass=1.0, direction=(0.0, -1.0, 0.0))
+        message = "LoadedPlaten direction (0.0, -1.0, 0.0) has 3 components, but the domain is 2-dimensional."
+        with pytest.raises(ValueError, match=re.escape(message)):
+            Geometry.rectangle(1.0, 1.0, top=platen)

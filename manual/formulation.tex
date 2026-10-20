@@ -1074,3 +1074,127 @@ shear-wave travel time across the smallest grain, $R_{\min}\sqrt{\rho/G}$,
 characterises the stiffest response the mesh-free discretisation must follow.
 The ratio of the two is the reason why DEM simulations of deposition are
 expensive: the physics is slow, the stability limit is fast.
+
+\section{Three-dimensional model}
+\label{sec:3d}
+
+The model of this chapter extends to three dimensions with the same contact law and the same boundary conditions.
+The geometry decides which model runs: a polygon (\texttt{Geometry}) gives the planar model and a polyhedron (\texttt{Geometry3D}) the spatial one.
+The $y$ axis stays vertical, so gravity, the water table and the deposition are unchanged, and $z$ is the depth.
+A planar domain is therefore a slice $z=\text{const}$ of a spatial one, and \texttt{Geometry3D.extrude} turns a polygon into the prism it is a slice of.
+
+\subsection{Degrees of freedom and equations of motion}
+
+Particle $i$ has six degrees of freedom: the three coordinates of its centre, $\mathbf{x}_{i}=(x_{i},y_{i},z_{i})$, and three rotations, with the angular velocity vector $\boldsymbol{\omega}_{i}$.
+The mass properties~\eqref{eq:massprops} are now those of the sphere itself.
+Its moment of inertia is the same about every axis, so the gyroscopic term $\boldsymbol{\omega}_{i}\times I_{i}\boldsymbol{\omega}_{i}$ vanishes and the Euler equation~\eqref{eq:euler} keeps its form, with vectors:
+\begin{equation}
+  I_{i}\,\dot{\boldsymbol{\omega}}_{i}
+    = \sum_{j\in\mathcal{C}_{i}} \mathbf{T}_{ij}
+     + \sum_{w\in\mathcal{W}_{i}} \mathbf{T}_{iw}.
+  \label{eq:euler-3d}
+\end{equation}
+In the planar model every rotation is about $\mathbf{e}_{z}$, and the scalars $\omega_{i}$ and $T_{i}$ of Section~\ref{sec:eom} are the $z$ components of these vectors.
+
+\subsection{Contact kinematics, force and torque}
+
+The overlap~\eqref{eq:overlap} and the normal $\mathbf{n}$ of~\eqref{eq:frame} are unchanged, but the tangential quantities now lie anywhere in the contact plane normal to $\mathbf{n}$, not along a single tangent.
+The material points of the two bodies at the contact, at $-R_{i}\mathbf{n}$ and $+R_{j}\mathbf{n}$ from their centres, slide over each other with the relative velocity
+\begin{equation}
+  \mathbf{v}_{ij}
+  = (\mathbf{v}_{i}-\mathbf{v}_{j})
+    - \bigl(R_{i}\boldsymbol{\omega}_{i}+R_{j}\boldsymbol{\omega}_{j}\bigr)\times\mathbf{n},
+  \label{eq:vrel-3d}
+\end{equation}
+which reduces to~\eqref{eq:vrel} for rotations about $\mathbf{e}_{z}$ and a normal in the $x$--$y$ plane, since then $\mathbf{e}_{z}\times\mathbf{n}=\mathbf{t}$.
+The decomposition~\eqref{eq:vn-vt}, the tangential history~\eqref{eq:xi-project}--\eqref{eq:xi-accumulate} and the Coulomb return mapping~\eqref{eq:coulomb} apply unchanged to vectors of three components; the friction limit is a circular cone about $\mathbf{n}$.
+The tangential force produces the torques
+\begin{equation}
+  \mathbf{T}_{ij} = -R_{i}\,\mathbf{n}\times\mathbf{F}_{t},
+  \qquad
+  \mathbf{T}_{ji} = -R_{j}\,\mathbf{n}\times\mathbf{F}_{t},
+  \label{eq:torque-3d}
+\end{equation}
+of which~\eqref{eq:Ti}--\eqref{eq:Tj} are the $z$ components.
+
+\subsection{Rolling resistance}
+
+In space the relative rotation $\boldsymbol{\omega}_{i}-\boldsymbol{\omega}_{j}$ of two bodies in contact has two parts.
+Its component along $\mathbf{n}$ twists the bodies about the normal, and its component in the contact plane rolls them over each other.
+Only rolling is resisted, as in the model of Ai et al.~\cite{ai2011}; twisting is free.
+The rolling spin and the rolling spring $\boldsymbol{\theta}_{r}$ are vectors in the contact plane,
+\begin{equation}
+  \boldsymbol{\omega}_{r}
+  = (\boldsymbol{\omega}_{i}-\boldsymbol{\omega}_{j})
+    - \bigl[(\boldsymbol{\omega}_{i}-\boldsymbol{\omega}_{j})\cdot\mathbf{n}\bigr]\mathbf{n},
+  \qquad
+  \boldsymbol{\theta}_{r} \;\leftarrow\;
+  \boldsymbol{\theta}_{r} - (\boldsymbol{\theta}_{r}\cdot\mathbf{n})\,\mathbf{n}
+  + \boldsymbol{\omega}_{r}\,\Delta t ,
+  \label{eq:theta-r-3d}
+\end{equation}
+where the stored spring is first projected onto the current contact plane, as the tangential spring is by~\eqref{eq:xi-project}.
+The trial moment $\mathbf{M}_{r}^{\mathrm{trial}}=-k_{r}\boldsymbol{\theta}_{r}-c_{r}\boldsymbol{\omega}_{r}$ has the stiffness and the damping of~\eqref{eq:Mr-trial}, and the limit~\eqref{eq:rolling-limit} caps its magnitude:
+\begin{equation}
+  \lVert\mathbf{M}_{r}^{\mathrm{trial}}\rVert > \mu_{r}R^{*}F_{n}:
+  \qquad
+  \mathbf{M}_{r} = \mu_{r}R^{*}F_{n}\,
+    \frac{\mathbf{M}_{r}^{\mathrm{trial}}}{\lVert\mathbf{M}_{r}^{\mathrm{trial}}\rVert},
+  \qquad
+  \boldsymbol{\theta}_{r} = -\frac{\mathbf{M}_{r}}{k_{r}} .
+  \label{eq:rolling-limit-3d}
+\end{equation}
+Body $i$ receives $\mathbf{M}_{r}$ and body $j$ the opposite moment.
+For a normal in the $x$--$y$ plane and rotations about $\mathbf{e}_{z}$ the projections change nothing, and the model reduces exactly to that of Section~\ref{sec:rolling}.
+
+\subsection{Polyhedral domain}
+
+The domain is a closed polyhedron whose faces are planar polygons, convex or not.
+Each face is given by its vertices in order around it.
+Every edge must be shared by exactly two faces that run along it in opposite directions, so that all faces are oriented alike.
+Either orientation is accepted: the sign of the enclosed volume decides on which side of each face the inward normal $\mathbf{n}_{k}$ lies.
+Each face carries one of the boundary conditions of Section~\ref{sec:domain}, and a load is applied on part of a side by splitting that side into coplanar faces, one of which is a loaded platen.
+
+The contact point $\mathbf{c}$ of face $k$ is the point of the face closest to the particle centre.
+It is the projection of the centre onto the plane of the face if that falls inside the polygon, and otherwise the closest point of its boundary, found with~\eqref{eq:closest-point} on each of its edges.
+The overlap and the normal then follow from~\eqref{eq:edge-overlap}, so a particle beyond a face touches it at one of its edges or vertices.
+
+\paragraph{Shared edges and vertices.}
+The rule of Section~\ref{sec:walls} carries over to edges and vertices shared by any number of faces.
+If the closest point of one solid face to a particle also lies on another solid face, the other face has a closest point at least as near, since that point is one of its own.
+Either its closest point is nearer, and it alone represents the contact, or it is the same point, and of all the faces that report that point only the one with the lowest index keeps the contact.
+A particle resting on the vertex where four floor faces meet therefore feels one contact, and so does a particle under the tip of a pyramidal body.
+The same geometric test is applied to the edges of a polygon (Section~\ref{sec:coupling}).
+
+\paragraph{Loaded bodies.}
+A loaded body is a set of faces that translates along $\mathbf{d}_{p}$.
+By default $\mathbf{d}_{p}$ is the mean of the inward normals of the faces weighted by their areas, the counterpart of~\eqref{eq:platen-direction}.
+To seat a body, its faces are swept along $\mathbf{d}_{p}$ until one of them touches a particle.
+Seen from the body, the particle moves along $\mathbf{u}=-\mathbf{d}_{p}$ and first touches a face in its interior, at one of its edges or at one of its vertices.
+The interior is touched when the distance of the centre from the plane of the face falls to the radius, as in~\eqref{eq:seat-line}, and the foot of the centre then lies inside the polygon.
+A vertex is touched at the first root~\eqref{eq:seat-end}.
+An edge from $\mathbf{a}$, with unit direction $\boldsymbol{\tau}$ and length $L$, is touched when the centre reaches the cylinder of radius $R_{i}$ about it.
+With $\mathbf{w}_{\perp}$ and $\mathbf{u}_{\perp}$ the components of $\mathbf{w}=\mathbf{x}_{i}-\mathbf{a}$ and of $\mathbf{u}$ normal to the edge, that happens after the travel
+\begin{equation}
+  s_{\text{edge}}
+  = \frac{-\mathbf{w}_{\perp}\cdot\mathbf{u}_{\perp}
+          - \sqrt{(\mathbf{w}_{\perp}\cdot\mathbf{u}_{\perp})^{2}
+                  - \lVert\mathbf{u}_{\perp}\rVert^{2}\bigl(\lVert\mathbf{w}_{\perp}\rVert^{2}-R_{i}^{2}\bigr)}}
+         {\lVert\mathbf{u}_{\perp}\rVert^{2}},
+  \label{eq:seat-edge}
+\end{equation}
+provided that the foot of the centre then lies on the edge, $0\le(\mathbf{w}+s_{\text{edge}}\mathbf{u})\cdot\boldsymbol{\tau}\le L$.
+The seating travel is the smallest non-negative candidate over all faces of the body and all particles, as in two dimensions.
+
+\subsection{Pore water}
+
+The buoyancy~\eqref{eq:cap}, the flow force~\eqref{eq:interaction} and the coupled pore pressure~\eqref{eq:biot} are written for spheres in space and apply as they stand.
+Only the porosity changes.
+The volume porosity of a packing of spheres can be measured directly, so the conversion~\eqref{eq:porosity3d} from a planar layer of discs is not needed: $\varepsilon$ is averaged from the volumes of the spheres on a grid of cubic cells (Section~\ref{sec:3d-numerics}).
+
+\subsection{Closed-form checks}
+
+The checks of the planar model hold in space.
+A sphere on a floor tilted about the oblique horizontal axis $\tfrac{1}{\sqrt{2}}(1,0,1)$, with the same gradients as in Section~\ref{sec:rolling}, rolls straight down the slope, without slipping and without twisting.
+It accelerates at \qtylist{3.0322;1.7688;0.5054}{\metre\per\second\squared} for $\mu_{r}=0$, $0.2$ and $0.4$, as~\eqref{eq:incline} requires, and stays put on the gentler gradient of $0.32$ with $\mu_{r}=0.4$.
+A simulation whose particles move in a plane $z=\text{const}$ of a domain extruded from a polygon reproduces the planar simulation of that polygon to rounding error, rolling resistance and loaded bodies included.

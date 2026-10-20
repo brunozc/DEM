@@ -85,6 +85,7 @@ All particle data are held in contiguous \texttt{NumPy} arrays:
 \end{tabular}
 \end{center}
 Here $P$ is the length of the neighbour list and $S$ the number of solid edges.
+In three dimensions the vectors have three components and the angular quantities become vectors (Section~\ref{sec:3d-numerics}).
 
 Two implementation details matter.  First, the reciprocals $1/m_{i}$ and
 $1/I_{i}$ are cached because they are used twice per step, in the two half
@@ -363,11 +364,9 @@ Edge contacts are evaluated for all particles and all solid edges at once,
 using~\eqref{eq:closest-point}--\eqref{eq:edge-overlap} and the degenerate
 effective quantities~\eqref{eq:wall-effective}.  The cost is $O(NS)$ with a very
 small constant; the overlap test rejects the interior particles immediately.
-Duplicate vertex contacts are removed with the rule of
-Section~\ref{sec:walls}: a contact whose closest point is a vertex shared with
-the neighbouring solid edge is dropped when that edge has a closer point of its
-own, and, when both edges report the shared vertex, only the earlier edge keeps
-it.
+Duplicate vertex contacts are removed with the rule of Section~\ref{sec:walls}, tested geometrically.
+For a particle that touches more than one solid edge, a contact whose closest point also lies on another of those edges is dropped when that edge has a closer point of its own; when both report the same point, only the edge with the lower index keeps it.
+The test needs no knowledge of which edges are neighbours, so it holds as well for the edges of a loaded body that has moved away from its neighbours, and for the faces of a polyhedron (Section~\ref{sec:3d}).
 
 Particles that leave the domain through an open edge are removed once their
 centre lies outside the polygon at a distance larger than an escape margin
@@ -800,4 +799,55 @@ include.
   \item \emph{Two dimensions}: force chains in 2D are more percolating and the
         packing fraction is systematically higher than in 3D; results transfer
         qualitatively, not quantitatively.
+        The three-dimensional model of Section~\ref{sec:3d} removes this limitation, at the cost of many more particles for a domain of the same size.
 \end{itemize}
+
+\section{Three-dimensional implementation}
+\label{sec:3d-numerics}
+
+The algorithm of Section~\ref{sec:overview} is the same in three dimensions; only the shapes of the arrays and the geometric queries change.
+
+\paragraph{State.}
+The arrays of Section~\ref{sec:state} gain a third column: \texttt{pos}, \texttt{vel} and \texttt{force} have the shape $(N,3)$, and \texttt{omega} and \texttt{torque} hold vectors, also of shape $(N,3)$.
+The rolling springs of the neighbour list and of the walls become vectors as well.
+A few helpers evaluate the cross products of~\eqref{eq:vrel-3d} and~\eqref{eq:torque-3d} as vectors in 3D and as their scalar $z$ components in 2D, with exactly the arithmetic of the planar model, whose results therefore do not change by a single bit.
+
+\paragraph{Contact detection.}
+The cell grid of Section~\ref{sec:broadphase} has cubic cells of side~\eqref{eq:cellsize}.
+Each cell is compared with itself and with 13 of its 26 neighbours: the 9 cells of the layer above, the 3 cells of the row above in its own layer and the next cell of its own row.
+This visits every unordered pair of cells once.
+The neighbour list and its rebuild criterion are unchanged.
+
+\paragraph{Face contacts.}
+Only particles closer to the plane of a face than their radius can touch it.
+The signed heights of all particles above all face planes are computed first, at a cost of $O(NF)$ for $F$ faces, and the closest points only for the few pairs within reach.
+Whether the projection of a centre falls inside a face is decided by the even--odd crossing count of the polygon of the face, in an orthonormal frame of its plane.
+Faces with fewer vertices than the largest one are padded with copies of their last vertex, so that all faces are processed together.
+The redundant contacts at shared edges and vertices are found, for the particles that touch more than one face, by testing whether the closest point of one face lies on another.
+
+\paragraph{Containment.}
+Whether a point lies inside the polyhedron is decided by its winding number, the solid angle that the closed surface subtends at the point divided by $4\pi$: one inside and zero outside, whatever the shape of the polyhedron.
+The solid angle of each face is the sum of those of the triangles of a fan from its first vertex, each evaluated in closed form~\cite{vanoosterom1983}.
+The test runs at the escape checks, when particles are placed during deposition, and once when the porosity grid samples the domain.
+
+\paragraph{Validation of the geometry.}
+\texttt{Geometry3D} checks that every face is planar, that the faces close the polyhedron and are oriented alike, that the enclosed volume is not zero, that no two adjacent faces fold back onto each other, and that no edge of the polyhedron pierces a face.
+
+\paragraph{Pore water.}
+The porosity grid has cubic cells, the cloud-in-cell weights are trilinear over the eight nodes around a point, and the volume of the domain around each node is sampled with $8\times8\times8$ points per cell.
+In the pressure equation~\eqref{eq:pressure-update} each node is a control volume of up to $h_{\varepsilon}^{3}$.
+Two neighbouring nodes exchange water through a face of area $h_{\varepsilon}^{2}$ times its open fraction, so the conductance of a face is $(k/\mu_{w})\,h_{\varepsilon}$ times that fraction, and the carried flux crosses the same area.
+Consider a column, drained at the top, whose skeleton carries water down onto an impermeable floor at a uniform rate $c$.
+At steady state the Darcy flow returns the carried water, so the pressure below the drained node, at height $y_{d}$, is the linear profile $c\,(y_{d}-y)/(k/\mu_{w})$.
+The solver reproduces it to a relative error below $10^{-6}$, also in the cells cut by the walls, and it reproduces the dissipation of a uniform excess pressure in such a column to within \num{1}\% of Terzaghi's solution, as in two dimensions.
+
+\paragraph{Output.}
+A frame stores the vertices of the faces of every loaded body.
+\texttt{render\_animation} and \texttt{render\_frame} draw a three-dimensional simulation in an oblique orthographic view, with $y$ up, the particles to scale and coloured by their speed, the walls transparent and the loaded bodies on top.
+Given a \texttt{section} coordinate they draw the vertical section $z=\text{const}$ instead, in which a sphere at a distance $\Delta z$ from the plane appears as a circle of radius $\sqrt{R^{2}-\Delta z^{2}}$.
+The section of a domain extruded from a polygon is that polygon, so it looks like the output of the planar model.
+
+\paragraph{Cost.}
+The cost of a step remains essentially linear in $N$.
+Filling a box of the same size takes many more particles in 3D than in 2D, though, and each particle has more neighbours.
+A step of the square footing example, \texttt{examples/square\_footing\_3d.py}, with \num{552} particles in a box of ten faces, takes about \qty{2.2}{\milli\second}, and the whole example runs in under a minute.

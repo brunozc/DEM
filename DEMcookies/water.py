@@ -12,23 +12,25 @@ Two levels of coupling between the water and the particles are available.
 The drag on a particle in a packing follows the correlation of Di Felice (1994). In a packing the flow that drags
 the particles also needs a pressure gradient, which pushes on their volume; for a uniform flow the two together are
 the drag divided by the porosity (Zhou et al., 2010), which is the force applied here. The local porosity is
-averaged on the coarse grid from the disc areas of the particles and converted to the porosity of an equivalent
-packing of spheres, which is what the drag correlation expects.
+averaged on a coarse grid, square in 2D and cubic in 3D. In 3D it is the volume porosity of the spheres. In 2D it is
+averaged from the disc areas of the particles and converted to the porosity of an equivalent packing of spheres,
+which is what the drag correlation expects.
 """
 
+import itertools
 import math
 from dataclasses import dataclass
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, List, Optional, Tuple, Union
 
 import numpy as np
 import numpy.typing as npt
 
 from .boundary import Open
-from .geometry import Geometry
+from .geometry3d import Domain
 from .globals import (ACTIVE_NODE_FRACTION, CARRIED_SOLID_FRACTION_DENSE, CARRIED_SOLID_FRACTION_DILUTE,
                       COUPLING_TIME_STEP_FRACTION, DENSE_POROSITY, MAX_POROSITY, MIN_POROSITY, PERMEABILITY_CONSTANT,
                       POROSITY_SAMPLES_PER_CELL, PRESSURE_SOLVER_ITERATIONS, PRESSURE_SOLVER_TOLERANCE)
-from .segments import project_onto_segments
+from .vectors import norm
 
 TimeFunction = Union[float, Callable[[float], float]]
 
@@ -184,13 +186,13 @@ def drag_force(relative_velocity: npt.NDArray[np.float64], radii: npt.NDArray[np
     """Drag of the water on fully submerged spheres, from the correlation of Di Felice (1994).
 
     Args:
-        relative_velocity: velocity of the water relative to each particle, u - v, shape (n, 2) [m/s].
+        relative_velocity: velocity of the water relative to each particle, u - v, shape (n, d) [m/s].
         radii: particle radii [m].
         porosity: local volume porosity around each particle.
         water: properties of the water.
 
     Returns:
-        The drag force on each particle, shape (n, 2) [N].
+        The drag force on each particle, shape (n, d) [N].
     """
     return np.asarray(porosity[:, None] * interaction_force(relative_velocity, radii, porosity, water))
 
@@ -200,15 +202,15 @@ def interaction_force(relative_velocity: npt.NDArray[np.float64], radii: npt.NDA
     """Force of the water flowing past particles in a packing, apart from buoyancy: the drag over the porosity.
 
     Args:
-        relative_velocity: velocity of the water relative to each particle, u - v, shape (n, 2) [m/s].
+        relative_velocity: velocity of the water relative to each particle, u - v, shape (n, d) [m/s].
         radii: particle radii [m].
         porosity: local volume porosity around each particle.
         water: properties of the water.
 
     Returns:
-        The force on each particle, shape (n, 2) [N].
+        The force on each particle, shape (n, d) [N].
     """
-    speed = np.hypot(relative_velocity[:, 0], relative_velocity[:, 1])
+    speed = norm(relative_velocity)
     return np.asarray(interaction_coefficient(speed, radii, porosity, water)[:, None] * relative_velocity)
 
 
@@ -231,74 +233,104 @@ def permeability(radii: npt.NDArray[np.float64], porosity: npt.NDArray[np.float6
 class PorosityField:
     """Coarse grid on which the porosity, and the pore pressure, are averaged with cloud-in-cell weights.
 
-    Each particle spreads its disc area over the four grid nodes around its centre, with bilinear weights. The area
-    of the domain around each node is spread the same way, from a fine sampling of the domain, so that cells cut by
-    walls are handled consistently. Values at a particle are interpolated with the same weights.
+    The cells are squares in 2D and cubes in 3D. Each particle spreads its solid, the area of its disc in 2D and the
+    volume of its sphere in 3D, over the 2^d grid nodes around its centre, with bilinear (2D) or trilinear (3D)
+    weights. The measure of the domain around each node, an area or a volume, is spread the same way from a fine
+    sampling of the domain, so that cells cut by walls are handled consistently. Values at a particle are
+    interpolated with the same weights.
+
+    Attributes:
+        dimension: number of space dimensions, 2 or 3.
+        cell_size: side of the grid cells [m].
+        shape: number of nodes along each axis.
+        node_volume: measure of the domain around each node, an area in 2D [m^2] and a volume in 3D [m^3];
+            ``node_area`` is the same array.
     """
 
-    def __init__(self, geometry: Geometry, cell_size: float) -> None:
+    def __init__(self, geometry: Domain, cell_size: float) -> None:
         """Build the grid over the domain.
 
         Args:
             geometry: domain.
             cell_size: side of the grid cells [m].
         """
-        x_min, y_min, x_max, y_max = geometry.bounding_box
+        low, high = geometry.bounds
+        d = geometry.dimension
+        self.dimension = d
         self.cell_size = cell_size
-        self.__origin = np.array([x_min - cell_size, y_min - cell_size])
-        self.shape = (int(math.ceil((x_max - x_min) / cell_size)) + 3, int(math.ceil((y_max - y_min) / cell_size)) + 3)
+        self.__origin = low - cell_size
+        self.shape = tuple(int(math.ceil((high[k] - low[k]) / cell_size)) + 3 for k in range(d))
+        # flat node index of a step along each axis, for nodes numbered in C order
+        self.__strides = tuple(int(np.prod(self.shape[k + 1:])) for k in range(d))
+        # corners of a cell, the first axis varying fastest
+        self.__corners = [tuple(reversed(corner)) for corner in itertools.product((0, 1), repeat=d)]
 
         spacing = cell_size / POROSITY_SAMPLES_PER_CELL
-        xs = np.arange(x_min + 0.5 * spacing, x_max, spacing)
-        ys = np.arange(y_min + 0.5 * spacing, y_max, spacing)
-        grid_x, grid_y = np.meshgrid(xs, ys, indexing="ij")
-        samples = np.column_stack((grid_x.ravel(), grid_y.ravel()))
+        axes = [np.arange(low[k] + 0.5 * spacing, high[k], spacing) for k in range(d)]
+        grids = np.meshgrid(*axes, indexing="ij")
+        samples = np.column_stack([grid.ravel() for grid in grids])
         samples = samples[geometry.contains(samples)]
         nodes, weights = self.weights(samples)
-        self.node_area = self.spread(np.full(samples.shape[0], spacing**2), nodes, weights)
+        self.node_volume = self.spread(np.full(samples.shape[0], spacing**d), nodes, weights)
+
+    @property
+    def size(self) -> int:
+        """Number of grid nodes."""
+        return int(np.prod(self.shape))
+
+    @property
+    def node_area(self) -> npt.NDArray[np.float64]:
+        """Measure of the domain around each node, under its 2D name; the same array as ``node_volume``."""
+        return self.node_volume
 
     @property
     def node_positions(self) -> npt.NDArray[np.float64]:
-        """Positions of the grid nodes, flattened, shape (nodes, 2) [m]."""
-        i, j = np.meshgrid(np.arange(self.shape[0]), np.arange(self.shape[1]), indexing="ij")
-        return np.asarray(self.__origin + self.cell_size * np.column_stack((i.ravel(), j.ravel())))
+        """Positions of the grid nodes, flattened, shape (nodes, d) [m]."""
+        indices = np.meshgrid(*[np.arange(count) for count in self.shape], indexing="ij")
+        return np.asarray(self.__origin + self.cell_size * np.column_stack([index.ravel() for index in indices]))
 
     def weights(self, points: npt.NDArray[np.float64]) -> Tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
-        """Return the four surrounding nodes of each point and their bilinear weights.
+        """Return the 2^d surrounding nodes of each point and their bilinear (2D) or trilinear (3D) weights.
 
         Args:
-            points: points, shape (n, 2) [m].
+            points: points, shape (n, d) [m].
 
         Returns:
-            The flat node indices, shape (n, 4), and the weights, shape (n, 4).
+            The flat node indices, shape (n, 2^d), and the weights, shape (n, 2^d).
         """
-        nx, ny = self.shape
         scaled = (points - self.__origin) / self.cell_size
         # points beyond the grid, e.g. escaping particles, are attached to its border
-        scaled[:, 0] = np.clip(scaled[:, 0], 0.0, nx - 1.000001)
-        scaled[:, 1] = np.clip(scaled[:, 1], 0.0, ny - 1.000001)
+        for k in range(self.dimension):
+            scaled[:, k] = np.clip(scaled[:, k], 0.0, self.shape[k] - 1.000001)
         corner = np.floor(scaled).astype(np.int64)
-        fx, fy = (scaled - corner).T
-        i, j = corner.T
-        nodes = np.column_stack((i * ny + j, (i + 1) * ny + j, i * ny + j + 1, (i + 1) * ny + j + 1))
-        weights = np.column_stack(((1 - fx) * (1 - fy), fx * (1 - fy), (1 - fx) * fy, fx * fy))
-        return nodes, weights
+        fraction = scaled - corner
+        nodes: List[npt.NDArray[np.int64]] = []
+        weights: List[npt.NDArray[np.float64]] = []
+        for offsets in self.__corners:
+            node = sum((corner[:, k] + offsets[k]) * self.__strides[k] for k in range(self.dimension))
+            factors = [fraction[:, k] if offsets[k] else 1 - fraction[:, k] for k in range(self.dimension)]
+            weight = factors[0]
+            for factor in factors[1:]:
+                weight = weight * factor
+            nodes.append(np.asarray(node, dtype=np.int64))
+            weights.append(weight)
+        return np.column_stack(nodes), np.column_stack(weights)
 
     def spread(self, amounts: npt.NDArray[np.float64], nodes: npt.NDArray[np.int64],
                weights: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        """Spread an amount carried by each point over its four surrounding nodes.
+        """Spread an amount carried by each point over its surrounding nodes.
 
         Args:
-            amounts: amount carried by each point, shape (n,) or (n, d).
-            nodes: node indices of the points, shape (n, 4).
-            weights: bilinear weights of the points, shape (n, 4).
+            amounts: amount carried by each point, shape (n,) or (n, k).
+            nodes: node indices of the points, shape (n, 2^d).
+            weights: weights of the points, shape (n, 2^d).
 
         Returns:
-            The total amount at each node, shape (nodes,) or (nodes, d).
+            The total amount at each node, shape (nodes,) or (nodes, k).
         """
-        size = self.shape[0] * self.shape[1]
         if amounts.ndim == 1:
-            return np.asarray(np.bincount(nodes.ravel(), (weights * amounts[:, None]).ravel(), size), dtype=np.float64)
+            return np.asarray(np.bincount(nodes.ravel(), (weights * amounts[:, None]).ravel(), self.size),
+                              dtype=np.float64)
         return np.column_stack([self.spread(amounts[:, k], nodes, weights) for k in range(amounts.shape[1])])
 
     def gather(self, node_values: npt.NDArray[np.float64], node_weights: npt.NDArray[np.float64],
@@ -306,10 +338,10 @@ class PorosityField:
         """Interpolate node values to points, each node counting in proportion to a weight of its own.
 
         Args:
-            node_values: value at each node, shape (nodes,) or (nodes, d).
-            node_weights: weight of each node, e.g. its domain area; nodes with zero weight are ignored.
-            nodes: node indices of the points, shape (n, 4).
-            weights: bilinear weights of the points, shape (n, 4).
+            node_values: value at each node, shape (nodes,) or (nodes, k).
+            node_weights: weight of each node, e.g. its domain volume; nodes with zero weight are ignored.
+            nodes: node indices of the points, shape (n, 2^d).
+            weights: weights of the points, shape (n, 2^d).
 
         Returns:
             The interpolated values, zero where all surrounding nodes have zero weight.
@@ -322,9 +354,56 @@ class PorosityField:
         result = np.einsum("nk,nkd->nd", combined, node_values[nodes]) / safe[:, None]
         return np.asarray(np.where(total[:, None] > 0.0, result, 0.0))
 
+    def solid_measure(self, radii: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Solid that each particle spreads on the grid: the area of its disc in 2D and the volume of its sphere in 3D.
+
+        Args:
+            radii: particle radii [m].
+
+        Returns:
+            The solid of each particle [m^2 or m^3].
+        """
+        if self.dimension == 2:
+            return np.asarray(math.pi * radii**2)
+        return np.asarray(4.0 / 3.0 * math.pi * radii**3)
+
+    def volume_porosity(self, measured: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Volume porosity of an equivalent packing of spheres, from the porosity measured on the grid.
+
+        Args:
+            measured: area porosity of the disc layer in 2D, which is converted, or volume porosity in 3D.
+
+        Returns:
+            The volume porosity, between 0 and 1.
+        """
+        if self.dimension == 2:
+            return porosity_3d(np.clip(measured, 0.0, 1.0))
+        return np.asarray(np.clip(measured, 0.0, 1.0))
+
+    def measured_porosity(self, positions: npt.NDArray[np.float64],
+                          radii: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Porosity around each particle as the grid measures it: of the disc layer in 2D, of the spheres in 3D.
+
+        Args:
+            positions: particle centres, shape (n, d) [m].
+            radii: particle radii [m].
+
+        Returns:
+            The local area (2D) or volume (3D) porosity at each particle.
+        """
+        nodes, weights = self.weights(positions)
+        solid = self.spread(self.solid_measure(radii), nodes, weights)
+        # interpolating solid and domain measure separately keeps nodes with little domain from dominating
+        local_solid = np.sum(weights * solid[nodes], axis=1)
+        local_volume = np.sum(weights * self.node_volume[nodes], axis=1)
+        safe = local_volume > 0.0
+        porosity = np.ones(radii.shape)
+        porosity[safe] = 1.0 - local_solid[safe] / local_volume[safe]
+        return np.asarray(np.clip(porosity, 0.0, 1.0))
+
     def porosity_2d(self, positions: npt.NDArray[np.float64],
                     radii: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
-        """Area porosity of the disc layer around each particle.
+        """Area porosity of the disc layer around each particle of a 2D domain.
 
         Args:
             positions: particle centres, shape (n, 2) [m].
@@ -332,16 +411,13 @@ class PorosityField:
 
         Returns:
             The local area porosity at each particle.
+
+        Raises:
+            ValueError: if the grid covers a 3D domain, whose porosity ``measured_porosity`` gives.
         """
-        nodes, weights = self.weights(positions)
-        solid = self.spread(math.pi * radii**2, nodes, weights)
-        # interpolating solid and domain area separately keeps nodes with little domain area from dominating
-        local_solid = np.sum(weights * solid[nodes], axis=1)
-        local_area = np.sum(weights * self.node_area[nodes], axis=1)
-        safe = local_area > 0.0
-        porosity = np.ones(radii.shape)
-        porosity[safe] = 1.0 - local_solid[safe] / local_area[safe]
-        return np.asarray(np.clip(porosity, 0.0, 1.0))
+        if self.dimension != 2:
+            raise ValueError("A 3D domain has no disc layer; its volume porosity is given by measured_porosity.")
+        return self.measured_porosity(positions, radii)
 
 
 class PorePressure:
@@ -350,16 +426,17 @@ class PorePressure:
     Each node is a control volume, the part of its cell inside the domain, and the pressure follows the Biot
     storage equation ``(eps / K_w) dp/dt = -div(c) + div((k / mu) grad p)``: the water stored by compressing it
     balances the water that the skeleton carries in or out, c, and the Darcy flow driven by the excess pressure.
-    Walls are impermeable; nodes above the free surface or next to an open edge are drained (p = 0). The diffusion
-    is integrated with backward Euler, so it is stable whatever the permeability.
+    Walls are impermeable; nodes above the free surface or next to an open facet are drained (p = 0). The diffusion
+    is integrated with backward Euler, so it is stable whatever the permeability. In 2D the control volumes are
+    slices of unit thickness.
 
     Attributes:
         pressure: excess pore pressure at each node, zero outside the domain and at drained nodes [Pa].
         iterations: number of conjugate gradient iterations of the last step.
     """
 
-    def __init__(self, field: PorosityField, geometry: Geometry) -> None:
-        """Set up the control volumes, the faces between them and the nodes next to open edges.
+    def __init__(self, field: PorosityField, geometry: Domain) -> None:
+        """Set up the control volumes, the faces between them and the nodes next to open facets.
 
         Args:
             field: grid on which the pressure lives.
@@ -367,13 +444,15 @@ class PorePressure:
         """
         self.field = field
         h = field.cell_size
-        nx, ny = field.shape
-        area = field.node_area
-        self.__active = area > ACTIVE_NODE_FRACTION * h**2
-        index = np.arange(nx * ny).reshape(nx, ny)
+        d = field.dimension
+        volume = field.node_volume
+        self.__active = volume > ACTIVE_NODE_FRACTION * h**d
+        index = np.arange(field.size).reshape(field.shape)
         firsts, seconds, axes = [], [], []
-        for axis, (first, second) in enumerate(((index[:-1, :], index[1:, :]), (index[:, :-1], index[:, 1:]))):
-            first, second = first.ravel(), second.ravel()
+        for axis in range(d):
+            lower = tuple(slice(None, -1) if k == axis else slice(None) for k in range(d))
+            upper = tuple(slice(1, None) if k == axis else slice(None) for k in range(d))
+            first, second = index[lower].ravel(), index[upper].ravel()
             both = self.__active[first] & self.__active[second]
             firsts.append(first[both])
             seconds.append(second[both])
@@ -382,17 +461,18 @@ class PorePressure:
         self.__second = np.concatenate(seconds)
         self.__axis = np.concatenate(axes)
         # a face between two cells cut by a wall is only partly open to flow
-        self.__open = np.minimum(np.minimum(area[self.__first], area[self.__second]) / h**2, 1.0)
+        self.__open = np.minimum(np.minimum(volume[self.__first], volume[self.__second]) / h**d, 1.0)
+        # a face has an area h^(d-1) and joins nodes h apart, so its conductance scales with h^(d-2)
+        self.__face_area = h**(d - 1)
+        self.__conductance_scale = h**(d - 2)
 
-        open_edges = [k for k, condition in enumerate(geometry.boundary_conditions) if isinstance(condition, Open)]
-        self.__open_edge_nodes = np.zeros(nx * ny, dtype=bool)
-        if open_edges:
-            _, offset = project_onto_segments(field.node_positions, geometry.edge_starts[open_edges],
-                                              geometry.edge_ends[open_edges])
-            distance = np.hypot(offset[..., 0], offset[..., 1]).min(axis=1)
+        open_facets = [k for k, condition in enumerate(geometry.boundary_conditions) if isinstance(condition, Open)]
+        self.__open_edge_nodes = np.zeros(field.size, dtype=bool)
+        if open_facets:
+            distance = geometry.facets.select(open_facets).distances(field.node_positions).min(axis=1)
             self.__open_edge_nodes = self.__active & (distance <= h)
 
-        self.pressure: npt.NDArray[np.float64] = np.zeros(nx * ny)
+        self.pressure: npt.NDArray[np.float64] = np.zeros(field.size)
         self.iterations = 0
 
     def advance(self, dt: float, porosity: npt.NDArray[np.float64], mobility: npt.NDArray[np.float64],
@@ -407,7 +487,7 @@ class PorePressure:
             dt: time step [s].
             porosity: volume porosity at each node.
             mobility: permeability over viscosity at each node [m^2/(Pa s)].
-            carried: flux of solid and water that the skeleton carries at each node, shape (nodes, 2) [m/s].
+            carried: flux of solid and water that the skeleton carries at each node, shape (nodes, d) [m/s].
             level: height of the free surface [m].
             bulk_modulus: bulk modulus of the water [Pa].
 
@@ -415,12 +495,12 @@ class PorePressure:
             RuntimeError: if the conjugate gradient solver does not converge.
         """
         size = self.pressure.size
-        h = self.field.cell_size
         a, b = self.__first, self.__second
         free = self.__active & ~self.__open_edge_nodes & (self.field.node_positions[:, 1] < level)
-        storage = np.where(free, self.field.node_area * porosity / (bulk_modulus * dt), 0.0)
+        storage = np.where(free, self.field.node_volume * porosity / (bulk_modulus * dt), 0.0)
         # harmonic mean, as for two resistances in series
-        conductance = 2.0 * mobility[a] * mobility[b] / (mobility[a] + mobility[b]) * self.__open
+        conductance = 2.0 * mobility[a] * mobility[b] / (mobility[a] + mobility[b]) * self.__open * \
+            self.__conductance_scale
         # a drained neighbour adds to the diagonal only, since its pressure is zero
         diagonal = storage + np.bincount(a, conductance, size) + np.bincount(b, conductance, size)
         linked = free[a] & free[b]
@@ -432,7 +512,7 @@ class PorePressure:
             return np.where(free, y, 0.0)
 
         # net outflow of the carried flux from each control volume
-        face_flux = 0.5 * (carried[a, self.__axis] + carried[b, self.__axis]) * self.__open * h
+        face_flux = 0.5 * (carried[a, self.__axis] + carried[b, self.__axis]) * self.__open * self.__face_area
         outflow = np.bincount(a, face_flux, size) - np.bincount(b, face_flux, size)
         rhs = np.where(free, storage * self.pressure - outflow, 0.0)
 
@@ -459,11 +539,11 @@ class PorePressure:
         self.pressure = x
 
     def gradient(self) -> npt.NDArray[np.float64]:
-        """Pressure gradient at each node, averaged over its faces that are open to flow, shape (nodes, 2) [Pa/m]."""
+        """Pressure gradient at each node, averaged over its faces that are open to flow, shape (nodes, d) [Pa/m]."""
         size = self.pressure.size
         face_gradient = (self.pressure[self.__second] - self.pressure[self.__first]) / self.field.cell_size
-        gradient = np.zeros((size, 2))
-        for axis in (0, 1):
+        gradient = np.zeros((size, self.field.dimension))
+        for axis in range(self.field.dimension):
             along = self.__axis == axis
             first, second = self.__first[along], self.__second[along]
             total = np.bincount(first, face_gradient[along], size) + np.bincount(second, face_gradient[along], size)
@@ -477,10 +557,10 @@ class FluidForces:
     """Forces of the water on the particles at one evaluation.
 
     Attributes:
-        force: buoyancy and pore pressure force on each particle, shape (n, 2) [N].
+        force: buoyancy and pore pressure force on each particle, shape (n, d) [N].
         drag_coefficient: drag per unit relative velocity of each particle, so that the drag is
             ``drag_coefficient * (water_velocity - v)`` [N s/m].
-        water_velocity: velocity of the water around each particle, shape (n, 2) [m/s].
+        water_velocity: velocity of the water around each particle, shape (n, d) [m/s].
         porosity: local volume porosity at each particle.
     """
 
@@ -493,7 +573,7 @@ class FluidForces:
 class PoreWater:
     """Runtime evaluation of the forces of the water on the particles."""
 
-    def __init__(self, water: Water, geometry: Geometry, max_radius: float) -> None:
+    def __init__(self, water: Water, geometry: Domain, max_radius: float) -> None:
         """Set up the porosity grid and, when coupled, the pore pressure.
 
         Args:
@@ -511,8 +591,8 @@ class PoreWater:
         """Buoyancy, pore pressure force and drag on every particle.
 
         Args:
-            positions: particle centres, shape (n, 2) [m].
-            velocities: particle velocities, shape (n, 2) [m/s].
+            positions: particle centres, shape (n, d) [m].
+            velocities: particle velocities, shape (n, d) [m/s].
             radii: particle radii [m].
             time: simulation time [s].
             gravity: magnitude of the gravitational acceleration [m/s^2].
@@ -526,11 +606,12 @@ class PoreWater:
         water = self.water
         field = self.field
         nodes, weights = field.weights(positions)
-        solid_area = field.spread(math.pi * radii**2, nodes, weights)
-        local_solid = np.sum(weights * solid_area[nodes], axis=1)
-        local_area = np.sum(weights * field.node_area[nodes], axis=1)
-        porosity_2d = np.where(local_area > 0.0, 1.0 - local_solid / np.where(local_area > 0.0, local_area, 1.0), 1.0)
-        porosity = np.maximum(porosity_3d(np.clip(porosity_2d, 0.0, 1.0)), MIN_POROSITY)
+        solid = field.spread(field.solid_measure(radii), nodes, weights)
+        local_solid = np.sum(weights * solid[nodes], axis=1)
+        local_volume = np.sum(weights * field.node_volume[nodes], axis=1)
+        measured = np.where(local_volume > 0.0, 1.0 - local_solid / np.where(local_volume > 0.0, local_volume, 1.0),
+                            1.0)
+        porosity = np.maximum(field.volume_porosity(measured), MIN_POROSITY)
 
         level = evaluate_at(water.level, time)
         fraction = submerged_fraction(positions[:, 1], radii, level)
@@ -542,14 +623,14 @@ class PoreWater:
         water_velocity = np.zeros_like(positions)
         water_velocity[:, 1] = evaluate_at(water.seepage_velocity, time) / porosity
         if self.pore_pressure is not None:
-            carried_velocity, gradient = self.__couple(velocities, radii, volume, nodes, weights, solid_area, level, dt)
+            carried_velocity, gradient = self.__couple(velocities, radii, volume, nodes, weights, solid, level, dt)
             water_velocity += carried_velocity
             # the excess pressure gradient acts on the volume of mixture that each particle represents
             mixture = volume / (1.0 - np.minimum(porosity, MAX_POROSITY))
             force -= (fraction * mixture)[:, None] * gradient
 
         relative = water_velocity - velocities
-        coefficient = interaction_coefficient(np.hypot(relative[:, 0], relative[:, 1]), radii, porosity, water)
+        coefficient = interaction_coefficient(norm(relative), radii, porosity, water)
         # a particle cut by the free surface is dragged in proportion to its submerged volume
         return FluidForces(force, fraction * coefficient, water_velocity, porosity)
 
@@ -557,7 +638,7 @@ class PoreWater:
         """Excess pore pressure at given points, zero for drained water.
 
         Args:
-            points: points, shape (n, 2) [m].
+            points: points, shape (n, d) [m].
 
         Returns:
             The excess pore pressure at each point [Pa].
@@ -565,7 +646,7 @@ class PoreWater:
         if self.pore_pressure is None:
             return np.zeros(points.shape[0])
         nodes, weights = self.field.weights(points)
-        return self.field.gather(self.pore_pressure.pressure, self.field.node_area, nodes, weights)
+        return self.field.gather(self.pore_pressure.pressure, self.field.node_volume, nodes, weights)
 
     def time_step_limit(self, radius: float, density: float) -> float:
         """Largest time step that keeps the explicit pore pressure coupling stable.
@@ -593,17 +674,17 @@ class PoreWater:
 
     def __couple(self, velocities: npt.NDArray[np.float64], radii: npt.NDArray[np.float64],
                  volume: npt.NDArray[np.float64], nodes: npt.NDArray[np.int64], weights: npt.NDArray[np.float64],
-                 solid_area: npt.NDArray[np.float64], level: float,
+                 solid: npt.NDArray[np.float64], level: float,
                  dt: float) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
         """Advance the excess pore pressure and return what it does at the particles.
 
         Args:
-            velocities: particle velocities, shape (n, 2) [m/s].
+            velocities: particle velocities, shape (n, d) [m/s].
             radii: particle radii [m].
             volume: particle volumes [m^3].
-            nodes: grid nodes around each particle, shape (n, 4).
-            weights: bilinear weights of those nodes, shape (n, 4).
-            solid_area: disc area spread on each node [m^2].
+            nodes: grid nodes around each particle, shape (n, 2^d).
+            weights: weights of those nodes, shape (n, 2^d).
+            solid: disc area (2D) or sphere volume (3D) spread on each node [m^2 or m^3].
             level: height of the free surface [m].
             dt: time step over which the pressure is advanced; zero leaves it unchanged [s].
 
@@ -619,9 +700,9 @@ class PoreWater:
             raise RuntimeError("The pore pressure is only solved for coupled water.")
         water = self.water
         field = self.field
-        area = field.node_area
-        node_porosity_2d = np.where(area > 0.0, 1.0 - solid_area / np.where(area > 0.0, area, 1.0), 1.0)
-        node_porosity = np.clip(porosity_3d(np.clip(node_porosity_2d, 0.0, 1.0)), MIN_POROSITY, MAX_POROSITY)
+        area = field.node_volume
+        measured = np.where(area > 0.0, 1.0 - solid / np.where(area > 0.0, area, 1.0), 1.0)
+        node_porosity = np.clip(field.volume_porosity(measured), MIN_POROSITY, MAX_POROSITY)
         solid_fraction = 1.0 - node_porosity
 
         # mean velocity of the skeleton at each node, weighted by solid volume
