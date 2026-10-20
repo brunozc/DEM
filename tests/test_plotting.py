@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from numpy.testing import assert_allclose
+from PIL import Image
 
 from DEMcookies import DEMSimulation, Geometry, Heaviside, LoadedPlaten, MaterialProperties, Particle, Water
 from DEMcookies.plotting import _clip_below, _current_outline, plot_load_curves, render_animation, render_frame
@@ -33,6 +34,18 @@ class TestPlotting:
         plot_load_curves(sim, str(tmp_path / "curves.png"))
         for name in ("run.gif", "last.png", "curves.png"):
             assert (tmp_path / name).stat().st_size > 0
+
+    def test_animation_draws_every_nth_frame(self, tmp_path: Path) -> None:
+        """An animation with a stride must hold every n-th recorded frame, starting from the first."""
+        sim = _loaded_simulation()
+        render_animation(sim, str(tmp_path / "run.gif"), every=3)
+        with Image.open(tmp_path / "run.gif") as gif:
+            assert gif.n_frames == len(range(0, len(sim.frames), 3))
+
+    def test_animation_with_invalid_stride_is_rejected(self, tmp_path: Path) -> None:
+        """A stride below one must be rejected."""
+        with pytest.raises(ValueError, match=re.escape("every must be at least 1, got 0.")):
+            render_animation(_loaded_simulation(), str(tmp_path / "run.gif"), every=0)
 
     def test_snapshot_with_water_is_written(self, tmp_path: Path) -> None:
         """A snapshot of a simulation with water must be written, with the water drawn below its level."""
