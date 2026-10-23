@@ -8,6 +8,7 @@ Features:
     Loaded platens driven by a pulse, Heaviside, sinusoidal or user-defined load history.
     Pore water below a water table, with buoyancy, porosity-dependent drag, optional seepage and an optional
     coupled excess pore pressure for undrained loading and consolidation.
+    Export of the particles, contacts and boundary to VTK files, to be viewed in ParaView.
 
 The geometry sets the number of dimensions: ``Geometry`` is a polygon and ``Geometry3D`` a polyhedron, with the
 y axis vertical in both.
@@ -20,11 +21,12 @@ from .geometry3d import Domain, Geometry3D
 from .globals import GlobalSettings
 from .loads import Heaviside, Pulse, Sinusoidal, TimeHistory
 from .particle_generation import Particle, Particle3D, generate_lattice_particles
-from .solver import DEMSimulation, Frame, LoadCurve, RainSettings, VelocityVerlet
+from .solver import ContactList, DEMSimulation, Frame, LoadCurve, RainSettings, VelocityVerlet
 from .water import Water
 
 __all__ = [
     "BoundaryCondition",
+    "ContactList",
     "DEMSimulation",
     "Domain",
     "Frame",

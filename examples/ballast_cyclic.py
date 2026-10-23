@@ -21,8 +21,15 @@ parallel; only differences larger than the scatter between packings say somethin
 and the settlement curves, their data, and snapshots and animations of the first packing are written to
 ``output/``. The five
 packings and three cases run as fifteen parallel processes; on sixteen cores that takes about twenty minutes.
+
+Every deposition and every case also writes ParaView files every ``--save-every-n-steps`` time steps, to
+``output/ballast_paraview/packing_<k>/deposit/`` and ``output/ballast_paraview/packing_<k>/<case>/``; run the
+``paraview_setup.py`` in such a folder in ParaView to see the grains, the force chains and the sleeper. The default,
+2000 steps, is about 0.024 s, or eight exports per load cycle, some 25 MB per case; ``--save-every-n-steps 0`` writes
+none.
 """
 
+import argparse
 import math
 import os
 from concurrent.futures import ProcessPoolExecutor
@@ -36,6 +43,7 @@ import numpy.typing as npt
 from DEMcookies import (BoundaryCondition, DEMSimulation, Geometry, LoadedPlaten, MaterialProperties, Open,
                         RainSettings, Sinusoidal, Wall, Water)
 from DEMcookies.plotting import render_animation, render_frame
+from DEMcookies.vtk_export import VTKWriter
 
 OUTPUT_DIR = "output"
 
@@ -76,6 +84,8 @@ COUPLED_CYCLES = 2
 # the animations show every tenth record, four per load cycle, at twenty frames per second
 ANIMATION_STRIDE = 10
 ANIMATION_FPS = 20
+# time steps between two ParaView exports: about 0.024 s, eight per load cycle; zero writes none
+SAVE_EVERY_N_STEPS = 2000
 
 
 @dataclass(frozen=True, eq=False)
@@ -89,6 +99,7 @@ class CaseTask:
         packing: index of the packing.
         output_dir: directory of the snapshot and the animation of the first packing.
         animate: whether the first packing is animated as well.
+        save_every_n_steps: number of time steps between two ParaView exports; zero writes none.
     """
 
     sim: DEMSimulation
@@ -96,6 +107,7 @@ class CaseTask:
     packing: int
     output_dir: str
     animate: bool
+    save_every_n_steps: int
 
 
 @dataclass(frozen=True, eq=False)
@@ -151,16 +163,38 @@ def build_simulation() -> DEMSimulation:
     return DEMSimulation(Geometry(vertices, conditions), MATERIAL, radius_range=RADIUS_RANGE)
 
 
-def deposit(packing: int) -> DEMSimulation:
+def paraview_writer(output_dir: str, packing: int, stage: str, save_every_n_steps: int) -> Optional[VTKWriter]:
+    """Return a writer of the ParaView files of one stage of a packing.
+
+    Args:
+        output_dir: directory of the results.
+        packing: index of the packing.
+        stage: name of the stage: "deposit" or a case.
+        save_every_n_steps: number of time steps between two exports; zero writes none.
+
+    Returns:
+        The writer, or None if no files are written.
+    """
+    if save_every_n_steps == 0:
+        return None
+    return VTKWriter(os.path.join(output_dir, "ballast_paraview", f"packing_{packing}", stage), save_every_n_steps)
+
+
+def deposit(packing: int, output_dir: str = OUTPUT_DIR, save_every_n_steps: int = SAVE_EVERY_N_STEPS) -> DEMSimulation:
     """Deposit the ballast under the sleeper, seat the sleeper on it and fill the cribs.
 
     Args:
         packing: index of the packing, which seeds the random positions of the grains.
+        output_dir: directory of the results.
+        save_every_n_steps: number of time steps between two ParaView exports of the deposition; zero writes none.
 
     Returns:
         The simulation, with the sleeper seated and the ballast at rest.
     """
     sim = build_simulation()
+    paraview = paraview_writer(output_dir, packing, "deposit", save_every_n_steps)
+    if paraview is not None:
+        sim.add_observer(paraview)
     steps_between = round(WAVE_INTERVAL / sim.dt)
     settle_steps = round(SETTLE_TIME / sim.dt)
     # the grains of the first pass must fit under the sleeper, which is seated on them afterwards
@@ -180,6 +214,9 @@ def deposit(packing: int) -> DEMSimulation:
                      settle_steps=2 * settle_steps,
                      record_every=settle_steps,
                      seed=2 * packing + 1))
+    # the cases write ParaView files of their own, so the packing they share must not take this writer along
+    if paraview is not None:
+        sim.remove_observer(paraview)
     return sim
 
 
@@ -222,6 +259,9 @@ def run_case(task: CaseTask) -> CaseResult:
     sim, case, packing = task.sim, task.case, task.packing
     # the animation shows this case from flooding on, not the deposition it shares with the other cases
     sim.frames.clear()
+    paraview = paraview_writer(task.output_dir, packing, case, task.save_every_n_steps)
+    if paraview is not None:
+        sim.add_observer(paraview)
     level = water_level(sim, case)
     if level is not None:
         sim.set_water(Water(level=level))
@@ -362,22 +402,25 @@ def save_results(results: Dict[str, List[CaseResult]], path: str) -> None:
     np.savez(path, **arrays)
 
 
-def main(output_dir: str = OUTPUT_DIR, animate: bool = True) -> None:
+def main(output_dir: str = OUTPUT_DIR, animate: bool = True, save_every_n_steps: int = SAVE_EVERY_N_STEPS) -> None:
     """Deposit the packings, load every case and write the results.
 
     Args:
         output_dir: directory of the figures.
         animate: whether the first packing of every case is animated as well.
+        save_every_n_steps: number of time steps between two ParaView exports of every deposition and case; zero
+            writes none.
     """
     os.makedirs(output_dir, exist_ok=True)
     with ProcessPoolExecutor(max_workers=min(os.cpu_count() or 1, PACKINGS * len(CASES) + 1)) as pool:
-        packings = list(pool.map(deposit, range(PACKINGS)))
+        packings = list(pool.map(deposit, range(PACKINGS), [output_dir] * PACKINGS, [save_every_n_steps] * PACKINGS))
         for packing, sim in enumerate(packings):
             print(f"packing {packing}: {sim.n} grains, ballast under the sleeper {sleeper_base(sim):.3f} m, "
                   f"crib top {sim.bed_top():.3f} m")
         check = pool.submit(coupled_check, packings[0])
         tasks = [
-            CaseTask(sim, case, packing, output_dir, animate) for packing, sim in enumerate(packings) for case in CASES
+            CaseTask(sim, case, packing, output_dir, animate, save_every_n_steps)
+            for packing, sim in enumerate(packings) for case in CASES
         ]
         results: Dict[str, List[CaseResult]] = {case: [] for case in CASES}
         for result in pool.map(run_case, tasks):
@@ -411,4 +454,12 @@ def main(output_dir: str = OUTPUT_DIR, animate: bool = True) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
+    parser.add_argument("--save-every-n-steps",
+                        type=int,
+                        default=SAVE_EVERY_N_STEPS,
+                        help=f"time steps between two ParaView exports, 0 for none (default {SAVE_EVERY_N_STEPS})")
+    arguments = parser.parse_args()
+    if arguments.save_every_n_steps < 0:
+        parser.error(f"--save-every-n-steps must be non-negative, got {arguments.save_every_n_steps}.")
+    main(save_every_n_steps=arguments.save_every_n_steps)

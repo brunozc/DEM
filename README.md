@@ -25,6 +25,7 @@ excess pore pressure. The same code runs in two and in three dimensions; the geo
   excess pore pressure for undrained loading and consolidation.
 - Animations of the simulation, in an oblique view or a vertical section in 3D, and plots of the load-displacement
   response.
+- Export to ParaView: the particles, the contact force chains and the moving boundary, as time series of VTK files.
 
 ## Installation
 
@@ -93,6 +94,40 @@ Any closed polyhedron with planar faces can be built with `Geometry3D(vertices, 
 on the face it sweeps. `render_animation` and `render_frame` draw a 3D simulation in an oblique view, or, given
 `section=z`, as a vertical section that looks like the 2D pictures.
 
+### ParaView
+
+A `VTKWriter` exports a simulation, 2D or 3D, to VTK files for [ParaView](https://www.paraview.org). Attached to a
+simulation, it exports its state every `save_every_n_steps` time steps, whatever the stage and independently of the
+frames recorded for the animations:
+
+```python
+from DEMcookies.vtk_export import VTKWriter
+
+sim.add_observer(VTKWriter("output/vtk", save_every_n_steps=500))
+sim.rain_until_full(RainSettings(record_every=60))
+```
+
+Every export adds a file to four time series, each listed with its simulation times in a `.pvd` collection:
+
+| Collection | Content |
+| --- | --- |
+| `particles.pvd` | particle centres with their radius, velocity, angular velocity, number of contacts and mean stress (from the contact forces, positive in compression); with water, also the porosity, the force of the water and the excess pore pressure |
+| `contacts.pvd` | a line per contact, between the centres of two particles or from a centre to a facet, with its normal force, tangential force and overlap |
+| `boundary.pvd` | the facets of the domain at their current position, with their boundary condition and the force and pressure of the particles on them |
+| `water.pvd` | the free surface of the water |
+
+The writer also leaves `paraview_setup.py` in the folder. Run it from the ParaView Python shell (View > Python Shell >
+Run Script), or start ParaView with `paraview --script=output/vtk/paraview_setup.py`. It shows two views with linked
+cameras at the end of the run: the particles as spheres of their true size coloured by their speed, and the force
+chains, the contacts drawn as tubes that grow thicker with the normal force, with the facets coloured by the pressure on
+them.
+
+Exporting never changes the run. A writer pickled with its simulation, e.g. in a checkpoint, carries on with its
+series when the simulation is resumed. `VTKWriter("output/vtk").write(sim)` exports the current state of any
+simulation, e.g. one loaded from a checkpoint, and `sim.contacts()` returns the contacts of the current state for your
+own analysis. An export of a few thousand 3D particles takes a few megabytes, so choose the interval with the length
+of the run in mind. The ballast examples write ParaView files every 2000 steps, which `--save-every-n-steps` changes.
+
 ## Examples
 
 The [examples/](examples/) folder holds more involved cases. Each writes its figures to `output/`.
@@ -125,6 +160,24 @@ Their animations, kept in [examples/videos/](examples/videos/), show the particl
 | ![Square footing pressed into a granular bed](examples/videos/square_footing_3d.gif) | ![Cone pushed into a granular bed](examples/videos/cone_penetration_3d.gif) |
 | **Hopper discharge** | **Upward seepage** |
 | ![Grains draining from a hopper through its trap door](examples/videos/hopper_discharge_3d.gif) | ![Submerged column fluidized by an upward flow](examples/videos/upward_seepage_3d.gif) |
+
+### Three-dimensional ballast study
+
+[ballast_cyclic_3d.py](examples/ballast_cyclic_3d.py) is the 3D counterpart of `ballast_cyclic.py`: half a sleeper in a
+box that holds one sleeper bay, on dry, half submerged and saturated ballast, with five packings of about 6600 grains.
+A run of 50 load cycles takes some five hours on one core, so the study is split into jobs that a cluster runs in
+parallel and that resume from their checkpoints: each packing is deposited once, then loaded in every case.
+
+```bash
+python examples/ballast_cyclic_3d.py deposit --packing 0
+python examples/ballast_cyclic_3d.py load --packing 0 --case dry --cycles 50
+python examples/ballast_cyclic_3d_post.py
+```
+
+[ballast_cyclic_3d.sbatch](examples/ballast_cyclic_3d.sbatch) submits the five depositions and the fifteen runs to a
+SLURM cluster, and [ballast_cyclic_3d_post.py](examples/ballast_cyclic_3d_post.py) turns the results in
+`output/ballast_3d/` into figures. Both stages also write ParaView files, every 2000 time steps by default
+(`--save-every-n-steps`), some 1.2 GB per run.
 
 ## Manual
 

@@ -675,12 +675,27 @@ Two output streams are collected at user-defined intervals.
         $F_{p}$ is the simplest available check of quasi-staticity: the two
         curves coincide when the platen inertia is negligible, and separate when
         the loading is too fast.
+  \item[Contacts] The method \texttt{contacts} returns the particle--particle and the particle--facet contacts of the current state, each with its contact point in the middle of the overlap, its normal, its overlap and its forces.
+        It evaluates the contact law as \texttt{compute\_forces} does but stores nothing, so the contacts can be inspected in the middle of a run without changing it.
 \end{description}
 
 The number of stored frames, not the number of time steps, dominates the memory
 footprint of a long run: each frame holds $O(N)$ floating-point numbers.  The
 module \texttt{plotting} turns the frames into an animation and the load curves
 into load--time and load--displacement plots.
+
+The module \texttt{vtk\_export} writes the state of a simulation to VTK files for ParaView instead.
+A \texttt{VTKWriter} attached to a simulation with \texttt{add\_observer} exports its state every \texttt{save\_every\_n\_steps} time steps, independently of the recorded frames, as four time series: the particles, the contacts, the facets of the domain at their current position and the free surface of the water.
+Drawn as tubes that grow thicker with the normal force, the contacts show the force chains that carry the load through the packing.
+Each particle $i$ carries, besides its velocity and spin, its number of contacts and the mean stress in it, from the forces of its contacts~\cite{TODO}:
+\begin{equation}
+  \bar{\boldsymbol{\sigma}}_{i} = -\frac{1}{V_{i}} \sum_{c}
+  \left(\mathbf{x}_{c} - \mathbf{x}_{i}\right) \otimes \mathbf{f}_{c},
+  \label{eq:particle-stress}
+\end{equation}
+where $V_{i}$ is the volume of the particle (\unit{\cubic\metre}), $\mathbf{x}_{i}$ its centre (\unit{\metre}), $\mathbf{x}_{c}$ the point of contact $c$ (\unit{\metre}) and $\mathbf{f}_{c}$ the force of that contact on the particle (\unit{\newton}).
+The minus sign makes compression positive, as in soil mechanics.
+Exporting never changes the run, and \texttt{write} exports the current state of any simulation, e.g.\ one loaded from a checkpoint.
 
 \section{Verification strategy}
 \label{sec:verification}

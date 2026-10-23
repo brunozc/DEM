@@ -15,7 +15,7 @@ import numpy as np
 import numpy.typing as npt
 
 from .boundary import Open, Platen
-from .contact import HertzMindlinModel, MaterialProperties, rayleigh_time_step
+from .contact import ContactForces, HertzMindlinModel, MaterialProperties, RollingMoments, rayleigh_time_step
 from .facets import FacetSet
 from .geometry3d import Domain
 from .water import PoreWater, Water, evaluate_at
@@ -168,6 +168,59 @@ class LoadCurve:
         return np.column_stack((self.time, self.applied, self.displacement, self.reaction)).reshape(-1, 4)
 
 
+@dataclass(frozen=True, eq=False)
+class ContactList:
+    """Contacts of the current state, either between two particles or between a particle and a facet of the domain.
+
+    Attributes:
+        first: particle i of each contact, shape (k,).
+        second: particle j of each contact, or the index in the geometry of the facet that particle i touches,
+            shape (k,).
+        point: contact point, in the middle of the overlap, shape (k, d) [m].
+        normal: unit normal pointing from j towards i, shape (k, d).
+        overlap: normal overlap, shape (k,) [m].
+        normal_force: magnitude of the normal force, shape (k,) [N].
+        tangential_force: tangential force on particle i, shape (k, d) [N].
+    """
+
+    first: npt.NDArray[np.int64]
+    second: npt.NDArray[np.int64]
+    point: npt.NDArray[np.float64]
+    normal: npt.NDArray[np.float64]
+    overlap: npt.NDArray[np.float64]
+    normal_force: npt.NDArray[np.float64]
+    tangential_force: npt.NDArray[np.float64]
+
+    @property
+    def force(self) -> npt.NDArray[np.float64]:
+        """Total contact force on particle i, shape (k, d) [N]; particle j, or the facet, receives the opposite."""
+        return np.asarray(self.normal_force[:, None] * self.normal + self.tangential_force)
+
+
+@dataclass(frozen=True, eq=False)
+class _ContactBatch:
+    """Contacts found and evaluated together, before their forces are applied and their springs stored.
+
+    Attributes:
+        first: particle i of each contact.
+        second: particle j of each contact, or the slot of the solid facet that particle i touches.
+        normal: unit normal pointing from j towards i, shape (k, d).
+        overlap: normal overlap [m].
+        forces: forces of the contact law, with the updated tangential springs.
+        rolling: rolling moments, with the updated rolling springs, or None without rolling resistance.
+    """
+
+    first: npt.NDArray[np.int64]
+    second: npt.NDArray[np.int64]
+    normal: npt.NDArray[np.float64]
+    overlap: npt.NDArray[np.float64]
+    forces: ContactForces
+    rolling: Optional[RollingMoments]
+
+
+Observer = Callable[["DEMSimulation"], None]
+
+
 class DEMSimulation:
     """A discrete element simulation with Hertz-Mindlin contacts, in a polygonal (2D) or polyhedral (3D) domain.
 
@@ -194,6 +247,9 @@ class DEMSimulation:
         time: simulation time [s].
         dt: time step [s].
     """
+
+    # a class default, so that a simulation pickled before observers existed still loads, with none
+    __observers: Tuple[Observer, ...] = ()
 
     def __init__(self,
                  geometry: Domain,
@@ -487,19 +543,47 @@ class DEMSimulation:
         """
         neighbours = self.__neighbours
         neighbours.update(self.pos, self.radius)
+        touching, batch = self.__pair_contacts(increment)
+        # a contact that opened loses its history, so a later re-closure starts from zero
+        neighbours.spring[~touching] = 0.0
+        neighbours.rolling[~touching] = 0.0
+        if batch is None:
+            return
+        neighbours.spring[touching] = batch.forces.tangential_spring
+
+        n = self.n
+        i, j = batch.first, batch.second
+        force = batch.forces.force
+        self.force += scatter_add(i, force, n) - scatter_add(j, force, n)
+        # both bodies receive a torque of the same sign, like two meshing gears
+        lever = cross(batch.normal, batch.forces.tangential_force)
+        self.torque -= scatter_add(i, scale(self.radius[i], lever), n) + scatter_add(j, scale(self.radius[j], lever), n)
+        if batch.rolling is not None:
+            neighbours.rolling[touching] = batch.rolling.rolling_spring
+            self.torque += scatter_add(i, batch.rolling.moment, n) - scatter_add(j, batch.rolling.moment, n)
+
+    def __pair_contacts(self, increment: float) -> Tuple[npt.NDArray[np.bool_], Optional[_ContactBatch]]:
+        """Find the candidate pairs of the neighbour list that touch, and evaluate their contact law.
+
+        Nothing is stored: the springs of the contacts are read, and their updated values returned.
+
+        Args:
+            increment: time over which the sliding and rolling velocities are accumulated into the springs [s].
+
+        Returns:
+            Which candidate pairs touch, and their contacts, or None if no pair touches.
+        """
+        neighbours = self.__neighbours
         first, second = neighbours.first, neighbours.second
         if first.size == 0:
-            return
+            return np.zeros(0, dtype=bool), None
         delta = self.pos[first] - self.pos[second]
         dist_sq = np.einsum("ij,ij->i", delta, delta)
         reach = self.radius[first] + self.radius[second]
         touching = dist_sq < reach * reach
-        # a contact that opened loses its history, so a later re-closure starts from zero
-        neighbours.spring[~touching] = 0.0
-        neighbours.rolling[~touching] = 0.0
         contacts = np.flatnonzero(touching)
         if contacts.size == 0:
-            return
+            return touching, None
 
         i = first[contacts]
         j = second[contacts]
@@ -515,25 +599,17 @@ class DEMSimulation:
         relative_velocity = self.vel[i] - self.vel[j] - spin_cross(spin, normal)
         mass_i, mass_j = self.mass[i], self.mass[j]
         effective_radius = radius_i * radius_j / (radius_i + radius_j)
-        result = self.model.evaluate(normal, reach[contacts] - dist, relative_velocity, neighbours.spring[contacts],
-                                     increment, effective_radius, mass_i * mass_j / (mass_i + mass_j))
-        neighbours.spring[contacts] = result.tangential_spring
-
-        n = self.n
-        force = result.force
-        self.force += scatter_add(i, force, n) - scatter_add(j, force, n)
-        # both bodies receive a torque of the same sign, like two meshing gears
-        lever = cross(normal, result.tangential_force)
-        self.torque -= scatter_add(i, scale(radius_i, lever), n) + scatter_add(j, scale(radius_j, lever), n)
-
+        overlap = reach[contacts] - dist
+        forces = self.model.evaluate(normal, overlap, relative_velocity, neighbours.spring[contacts], increment,
+                                     effective_radius, mass_i * mass_j / (mass_i + mass_j))
+        rolling = None
         if self.model.rolling_friction > 0.0:
             # a particle rolls about its contact point, so its inertia there is I + m R^2
             inertia_i = self.inertia[i] + mass_i * radius_i**2
             inertia_j = self.inertia[j] + mass_j * radius_j**2
-            rolling = self.model.rolling(result, self.omega[i] - self.omega[j], neighbours.rolling[contacts], increment,
+            rolling = self.model.rolling(forces, self.omega[i] - self.omega[j], neighbours.rolling[contacts], increment,
                                          effective_radius, inertia_i * inertia_j / (inertia_i + inertia_j))
-            neighbours.rolling[contacts] = rolling.rolling_spring
-            self.torque += scatter_add(i, rolling.moment, n) - scatter_add(j, rolling.moment, n)
+        return touching, _ContactBatch(i, j, normal, overlap, forces, rolling)
 
     def __solid_state(self) -> Tuple[FacetSet, npt.NDArray[np.float64]]:
         """Return the solid facets at their current position and their velocities, shape (facets, d) [m/s]."""
@@ -594,40 +670,25 @@ class DEMSimulation:
         """
         if self.__solid.count == 0:
             return
-        facets, velocities = self.__solid_state()
-        particle, facet, offset, dist_sq = facets.touching(self.pos, self.radius)
-        keep = ~self.__redundant_contacts(particle, facet, offset, facets)
-        particle, facet, offset, dist_sq = particle[keep], facet[keep], offset[keep], dist_sq[keep]
-        touching = np.zeros((self.n, facets.count), dtype=bool)
-        touching[particle, facet] = True
+        batch = self.__facet_contacts(increment)
+        touching = np.zeros((self.n, self.__solid.count), dtype=bool)
+        if batch is not None:
+            touching[batch.first, batch.second] = True
         self.__wall_spring[~touching] = 0.0
         self.__wall_rolling[~touching] = 0.0
-        if particle.size == 0:
+        if batch is None:
             return
-
-        dist = np.sqrt(dist_sq)
-        radius = self.radius[particle]
-        # a centre exactly on the facet has no defined normal, so it is pushed along the inward normal
-        normal = self.__solid_normals[facet].copy()
-        separated = dist > GEOMETRY_TOLERANCE * radius
-        normal[separated] = offset[separated] / dist[separated, None]
-        relative_velocity = (self.vel[particle] - velocities[facet] -
-                             spin_cross(scale(radius, self.omega[particle]), normal))
-        # a wall is a body of infinite radius and mass, so R* and m* reduce to the particle's
-        result = self.model.evaluate(normal, radius - dist, relative_velocity, self.__wall_spring[particle, facet],
-                                     increment, radius, self.mass[particle], self.__solid_friction[facet])
-        self.__wall_spring[particle, facet] = result.tangential_spring
+        particle, facet = batch.first, batch.second
+        self.__wall_spring[particle, facet] = batch.forces.tangential_spring
 
         n = self.n
-        force = result.force
+        force = batch.forces.force
         self.force += scatter_add(particle, force, n)
-        self.torque -= scatter_add(particle, scale(radius, cross(normal, result.tangential_force)), n)
-        if self.model.rolling_friction > 0.0:
-            # facets never rotate, so the relative spin is the particle's own
-            rolling = self.model.rolling(result, self.omega[particle], self.__wall_rolling[particle, facet], increment,
-                                         radius, self.inertia[particle] + self.mass[particle] * radius**2)
-            self.__wall_rolling[particle, facet] = rolling.rolling_spring
-            self.torque += scatter_add(particle, rolling.moment, n)
+        lever = cross(batch.normal, batch.forces.tangential_force)
+        self.torque -= scatter_add(particle, scale(self.radius[particle], lever), n)
+        if batch.rolling is not None:
+            self.__wall_rolling[particle, facet] = batch.rolling.rolling_spring
+            self.torque += scatter_add(particle, batch.rolling.moment, n)
         # the particles push each facet with the opposite of the force it exerts on them
         self.edge_forces[self.__solid_index] = -scatter_add(facet, force, self.__solid_index.size)
 
@@ -641,6 +702,88 @@ class DEMSimulation:
                 reactions = np.bincount(platen[on_platen], along, len(self.platens))
                 for p, reaction in zip(self.platens, reactions):
                     p.reaction = float(reaction)
+
+    def __facet_contacts(self, increment: float) -> Optional[_ContactBatch]:
+        """Find the particles that touch a solid facet, and evaluate their contact law.
+
+        Nothing is stored: the springs of the contacts are read, and their updated values returned.
+
+        Args:
+            increment: time over which the sliding and rolling velocities are accumulated into the springs [s].
+
+        Returns:
+            The contacts, whose second member is the slot of the solid facet, or None if no particle touches one.
+        """
+        facets, velocities = self.__solid_state()
+        particle, facet, offset, dist_sq = facets.touching(self.pos, self.radius)
+        keep = ~self.__redundant_contacts(particle, facet, offset, facets)
+        particle, facet, offset, dist_sq = particle[keep], facet[keep], offset[keep], dist_sq[keep]
+        if particle.size == 0:
+            return None
+
+        dist = np.sqrt(dist_sq)
+        radius = self.radius[particle]
+        # a centre exactly on the facet has no defined normal, so it is pushed along the inward normal
+        normal = self.__solid_normals[facet].copy()
+        separated = dist > GEOMETRY_TOLERANCE * radius
+        normal[separated] = offset[separated] / dist[separated, None]
+        relative_velocity = (self.vel[particle] - velocities[facet] -
+                             spin_cross(scale(radius, self.omega[particle]), normal))
+        overlap = radius - dist
+        # a wall is a body of infinite radius and mass, so R* and m* reduce to the particle's
+        forces = self.model.evaluate(normal, overlap, relative_velocity, self.__wall_spring[particle, facet], increment,
+                                     radius, self.mass[particle], self.__solid_friction[facet])
+        rolling = None
+        if self.model.rolling_friction > 0.0:
+            # facets never rotate, so the relative spin is the particle's own
+            rolling = self.model.rolling(forces, self.omega[particle], self.__wall_rolling[particle, facet], increment,
+                                         radius, self.inertia[particle] + self.mass[particle] * radius**2)
+        return _ContactBatch(particle, facet, normal, overlap, forces, rolling)
+
+    def contacts(self) -> Tuple[ContactList, ContactList]:
+        """Return the contacts of the current state, between particles and between particles and the solid facets.
+
+        The contact law is evaluated as ``compute_forces`` evaluates it, without advancing the contact history, but
+        nothing that the motion depends on is changed, so the contacts can be inspected or exported in the middle of a
+        run without affecting it.
+
+        Returns:
+            The particle-particle contacts, and the particle-facet contacts, whose ``second`` is the index of the
+            facet in the geometry.
+        """
+        pairs: Optional[_ContactBatch] = None
+        walls: Optional[_ContactBatch] = None
+        if self.n:
+            # the list is already up to date after a step; it only changes after particles were added or removed
+            self.__neighbours.update(self.pos, self.radius)
+            _, pairs = self.__pair_contacts(0.0)
+            if self.__solid.count:
+                walls = self.__facet_contacts(0.0)
+        return self.__contact_list(pairs), self.__contact_list(walls, self.__solid_index)
+
+    def __contact_list(self,
+                       batch: Optional[_ContactBatch],
+                       facet_index: Optional[npt.NDArray[np.int64]] = None) -> ContactList:
+        """Turn a batch of evaluated contacts into a contact list.
+
+        Args:
+            batch: the contacts, or None if there are none.
+            facet_index: index in the geometry of each solid facet slot, for contacts with the facets; None for
+                contacts between particles.
+
+        Returns:
+            The contacts.
+        """
+        d = self.dimension
+        if batch is None:
+            none = np.zeros(0, dtype=np.int64)
+            return ContactList(none, none.copy(), np.zeros((0, d)), np.zeros((0, d)), np.zeros(0), np.zeros(0),
+                               np.zeros((0, d)))
+        second = batch.second if facet_index is None else facet_index[batch.second]
+        # the middle of the overlap lies inside particle i, R_i - delta / 2 from its centre against the normal
+        point = self.pos[batch.first] - scale(self.radius[batch.first] - 0.5 * batch.overlap, batch.normal)
+        return ContactList(batch.first, second, point, batch.normal, batch.overlap, batch.forces.normal_force,
+                           batch.forces.tangential_force)
 
     # ------------------------------------------------------------------ #
     #  Time integration                                                  #
@@ -690,6 +833,32 @@ class DEMSimulation:
         self.omega += scale(self.inv_inertia, half * self.torque)
         for platen in active:
             platen.velocity += half * platen.acceleration(self.load_time, self.__gravity)
+        for observer in self.__observers:
+            observer(self)
+
+    def add_observer(self, observer: Observer) -> None:
+        """Call a function with the simulation after every time step, e.g. a ``VTKWriter`` that exports it.
+
+        The observers belong to the simulation: a simulation that is pickled, e.g. as a checkpoint, takes its
+        observers along, so they must be picklable themselves, and they carry on when it is resumed.
+
+        Args:
+            observer: function of the simulation.
+        """
+        self.__observers = self.__observers + (observer, )
+
+    def remove_observer(self, observer: Observer) -> None:
+        """Stop calling an observer, e.g. before the simulation is stored for runs that export elsewhere.
+
+        Args:
+            observer: an observer of the simulation.
+
+        Raises:
+            ValueError: if the function does not observe the simulation.
+        """
+        if not any(o is observer for o in self.__observers):
+            raise ValueError(f"{observer!r} does not observe this simulation.")
+        self.__observers = tuple(o for o in self.__observers if o is not observer)
 
     # ------------------------------------------------------------------ #
     #  Diagnostics and recording                                         #

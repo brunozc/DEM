@@ -1,9 +1,11 @@
 venv/
 __pycache__/
+.vscode/
 *.egg-info/
 .pytest_cache/
 .mypy_cache/
 .coverage
+output/
 
 # LaTeX build artefacts of the manual
 manual/*.aux
