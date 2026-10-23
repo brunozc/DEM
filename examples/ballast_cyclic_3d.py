@@ -437,6 +437,24 @@ def sleeper_load(settings: LoadSettings, uplift: float) -> Sinusoidal:
                       phase=-0.5 * math.pi)
 
 
+def sleeper_uplift(sim: DEMSimulation, level: Optional[float]) -> float:
+    """Return the upward force of the water on the sleeper base [N].
+
+    Args:
+        sim: simulation with its water, if the case has any.
+        level: height of the water table, None when dry [m].
+
+    Returns:
+        The uplift, zero when dry or when the water table lies below the sleeper base.
+    """
+    base = sleeper_base(sim)
+    if sim.water is None or level is None or level <= base:
+        return 0.0
+    left, right, length = sleeper_footprint(sim)
+    # the pore water under the base is at hydrostatic pressure, since it drains freely
+    return sim.water.density * sim.settings.gravity * (level - base) * (right - left) * length
+
+
 def pressure_points(sim: DEMSimulation) -> npt.NDArray[np.float64]:
     """Return the points under the sleeper at which the excess pore pressure is sampled, shape (k, 3) [m]."""
     left, right, length = sleeper_footprint(sim)
@@ -474,11 +492,7 @@ def start_run(sim: DEMSimulation,
     sim.rest(REST_TIME, record_every=round(REST_TIME / sim.dt))
     sim.frames.clear()
     base = sleeper_base(sim)
-    left, right, length = sleeper_footprint(sim)
-    uplift = 0.0
-    if sim.water is not None and level is not None and level > base:
-        # the pore water under the base is at hydrostatic pressure, since it drains freely
-        uplift = sim.water.density * sim.settings.gravity * (level - base) * (right - left) * length
+    uplift = sleeper_uplift(sim, level)
     platen = sim.platens[0]
     # the deposited packing is shared by every load, so the sleeper only gets the load of the run now
     platen.spec = dataclasses.replace(platen.spec, load=sleeper_load(settings, uplift))
@@ -537,7 +551,7 @@ def per_cycle(time: npt.NDArray[np.float64], displacement: npt.NDArray[np.float6
     return residual, peak
 
 
-def save_results(run: LoadRun, path: str) -> None:
+def save_results(run: LoadRun, path: str, extra: Optional[Dict[str, npt.NDArray[Any]]] = None) -> None:
     """Save the load history, the forces on the faces and the positions of the grains of a run.
 
     Args:
@@ -545,6 +559,7 @@ def save_results(run: LoadRun, path: str) -> None:
         path: output file [npz]. Scalars describe the run in SI units; ``time``, ``applied``, ``displacement``,
             ``reaction``, ``excess_pressure`` and ``face_forces`` (samples, faces, 3) are its records, and
             ``positions_<cycle>`` the positions of the grains after that cycle, one of ``snapshot_cycles``.
+        extra: further arrays to store, by name, e.g. those of a study that builds on this one.
     """
     sim = run.sim
     left, right, length = sleeper_footprint(sim)
@@ -584,6 +599,7 @@ def save_results(run: LoadRun, path: str) -> None:
     }
     for cycle, positions in snapshots.items():
         arrays[f"positions_{cycle}"] = positions
+    arrays.update(extra or {})
     temporary = path + ".tmp"
     with open(temporary, "wb") as stream:
         np.savez(stream, **arrays)
