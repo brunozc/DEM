@@ -1,6 +1,7 @@
 """Tests of the integrator, the settings and the DEM simulation engine."""
 
 import math
+import pickle
 import re
 from typing import List, Tuple
 
@@ -652,3 +653,124 @@ class TestDEMSimulation3DPhysics:
             (sim.radius[:, None] + sim.radius[None, :])
         np.fill_diagonal(gap, np.inf)
         assert gap.min() > -0.05 * sim.radius_range[0]
+
+
+class _StepCounter:
+    """Observer that counts the steps a simulation takes; a class, so that a simulation pickles with it."""
+
+    def __init__(self) -> None:
+        """Start from zero."""
+        self.count = 0
+
+    def __call__(self, sim: DEMSimulation) -> None:
+        """Count one step."""
+        self.count += 1
+
+
+class TestContacts:
+    """Tests of the contacts of the current state, and of the observers of the recorded frames."""
+
+    def test_particle_on_floor_touches_it_at_the_bottom(self) -> None:
+        """A particle resting on the floor must touch the floor edge below its centre and carry its weight there."""
+        material = _material()
+        sim = DEMSimulation(Geometry.rectangle(0.1, 0.1), material, particles=[Particle(0.05, 0.01, 0.01)])
+        sim.rest(0.5)
+        pairs, walls = sim.contacts()
+        assert pairs.first.size == 0
+        assert walls.first.tolist() == [0] and walls.second.tolist() == [0]
+        assert_allclose(walls.normal, [[0.0, 1.0]], atol=1e-12)
+        assert_allclose(walls.overlap, 0.01 - sim.pos[:, 1], rtol=1e-12)
+        assert_allclose(walls.point, [[0.05, 0.5 * (sim.pos[0, 1] - 0.01)]], atol=1e-12)
+        assert_allclose(walls.normal_force, _sphere_mass(material, 0.01) * 9.81, rtol=1e-3)
+        assert_allclose(walls.force, [[0.0, walls.normal_force[0]]], atol=1e-9)
+
+    def test_pair_contact_lies_in_the_middle_of_the_overlap(self) -> None:
+        """Two overlapping particles must touch in the middle of their overlap, with the normal pointing to i."""
+        sim = DEMSimulation(Geometry.rectangle(1.0, 1.0),
+                            _material(),
+                            particles=[Particle(0.5, 0.5, 0.01), Particle(0.519, 0.5, 0.012)],
+                            settings=GlobalSettings(gravity=0.0))
+        pairs, walls = sim.contacts()
+        assert walls.first.size == 0
+        assert pairs.first.tolist() == [0] and pairs.second.tolist() == [1]
+        assert_allclose(pairs.normal, [[-1.0, 0.0]], atol=1e-12)
+        assert_allclose(pairs.overlap, [0.003], rtol=1e-9)
+        # the overlap spans x = 0.507 to 0.51
+        assert_allclose(pairs.point, [[0.5085, 0.5]], rtol=1e-12)
+        assert pairs.normal_force[0] > 0.0
+        assert_allclose(pairs.force[0] / pairs.normal_force[0], [-1.0, 0.0], atol=1e-12)
+
+    def test_contacts_with_facets_name_the_facet_of_the_geometry(self) -> None:
+        """Contacts with a facet must give its index in the geometry, which open facets also count."""
+        geometry = Geometry3D.box(0.1, 0.1, 0.1, bottom=Open(), right=Wall())
+        sim = DEMSimulation(geometry, _material(), particles=[Particle3D(0.095, 0.05, 0.05, 0.01)])
+        _, walls = sim.contacts()
+        assert walls.second.tolist() == [1]
+        assert_allclose(walls.normal, [[-1.0, 0.0, 0.0]], atol=1e-12)
+
+    def test_contacts_do_not_change_the_run(self) -> None:
+        """Inspecting the contacts at every step must leave the motion of the particles exactly as it was."""
+        runs = []
+        for inspect in (False, True):
+            geometry = Geometry3D.box(0.05, 0.1, 0.05)
+            sim = DEMSimulation(geometry,
+                                _material(restitution=0.5, rolling_friction=0.2),
+                                particles=generate_lattice_particles(geometry, 20, (0.004, 0.005)))
+            for _ in range(600):
+                sim.step()
+                if inspect:
+                    sim.contacts()
+            runs.append(sim)
+        plain, inspected = runs
+        assert inspected.contacts()[0].first.size > 0
+        assert_allclose(inspected.pos, plain.pos, rtol=0.0, atol=1e-15)
+        assert_allclose(inspected.omega, plain.omega, rtol=0.0, atol=1e-12)
+
+    def test_empty_domain_has_no_contacts(self) -> None:
+        """An empty domain must return empty contact lists of the right shapes."""
+        sim = DEMSimulation(Geometry3D.box(0.1, 0.1, 0.1), _material(), radius_range=(0.005, 0.01))
+        for contacts in sim.contacts():
+            assert contacts.first.shape == contacts.second.shape == contacts.normal_force.shape == (0, )
+            assert contacts.point.shape == contacts.normal.shape == contacts.tangential_force.shape == (0, 3)
+
+    def test_observers_see_every_step(self) -> None:
+        """Every observer must be called once per time step, and keep counting in a pickled copy."""
+        sim = DEMSimulation(Geometry.rectangle(0.1, 0.1), _material(), particles=[Particle(0.05, 0.05, 0.01)])
+        counters = [_StepCounter(), _StepCounter()]
+        for counter in counters:
+            sim.add_observer(counter)
+        sim.rest(0.01, record_every=10)
+        assert sim.steps_taken > 10
+        assert [counter.count for counter in counters] == [sim.steps_taken] * 2
+        copy = pickle.loads(pickle.dumps(sim))
+        copy.rest(0.01, record_every=10)
+        assert [counter.count for counter in counters] == [sim.steps_taken] * 2
+        assert copy._DEMSimulation__observers[0].count == copy.steps_taken
+
+    def test_removed_observer_is_no_longer_called(self) -> None:
+        """An observer that is removed must not be called again, while the others still are."""
+        sim = DEMSimulation(Geometry.rectangle(0.1, 0.1), _material(), particles=[Particle(0.05, 0.05, 0.01)])
+        kept, removed = _StepCounter(), _StepCounter()
+        sim.add_observer(kept)
+        sim.add_observer(removed)
+        sim.step()
+        sim.remove_observer(removed)
+        sim.step()
+        assert (kept.count, removed.count) == (2, 1)
+
+    def test_removing_a_stranger_is_rejected(self) -> None:
+        """Removing a function that does not observe the simulation must be rejected."""
+        sim = DEMSimulation(Geometry.rectangle(0.1, 0.1), _material(), particles=[Particle(0.05, 0.05, 0.01)])
+        stranger = _StepCounter()
+        with pytest.raises(ValueError, match=re.escape(f"{stranger!r} does not observe this simulation.")):
+            sim.remove_observer(stranger)
+
+    def test_simulation_pickled_before_observers_existed_still_steps(self) -> None:
+        """A simulation whose state has no observers, as one pickled by an earlier version, must still step."""
+        sim = DEMSimulation(Geometry.rectangle(0.1, 0.1), _material(), particles=[Particle(0.05, 0.05, 0.01)])
+        sim.add_observer(_StepCounter())
+        state = {k: v for k, v in sim.__dict__.items() if not k.endswith("__observers")}
+        old = DEMSimulation.__new__(DEMSimulation)
+        old.__dict__.update(state)
+        old.rest(0.01, record_every=10)
+        assert old.steps_taken > 0 and len(old.frames) > 0
