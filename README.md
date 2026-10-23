@@ -23,8 +23,8 @@ excess pore pressure. The same code runs in two and in three dimensions; the geo
 - Load histories: `Pulse`, `Heaviside`, `Sinusoidal`, `TimeHistory`, or any function of time.
 - Pore water below a water table, with buoyancy, porosity-dependent drag, optional seepage and an optional coupled
   excess pore pressure for undrained loading and consolidation.
-- Animations of the simulation, in an oblique view or a vertical section in 3D, and plots of the load-displacement
-  response.
+- Animations of the simulation, in an oblique view or a vertical section in 3D, as GIF or as MP4 (with ffmpeg), and
+  plots of the load-displacement response.
 - Export to ParaView: the particles, the contact force chains and the moving boundary, as time series of VTK files.
 
 ## Installation

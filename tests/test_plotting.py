@@ -1,12 +1,15 @@
 """Tests of the animation and load curve plots."""
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pytest
+from matplotlib.animation import FFMpegWriter
 from numpy.testing import assert_allclose
 from PIL import GifImagePlugin, Image
 
@@ -16,6 +19,21 @@ from DEMcookies.plotting import (_chain_loops, _clip_below, _current_outline, _c
                                  _plane_crossings, plot_load_curves, render_animation, render_frame)
 
 MATERIAL = MaterialProperties(density=2500.0, youngs_modulus=5.0e6, poisson_ratio=0.25, restitution=0.1, friction=0.5)
+
+NEEDS_FFMPEG = pytest.mark.skipif(not FFMpegWriter.isAvailable() or shutil.which("ffprobe") is None,
+                                  reason="ffmpeg and ffprobe are needed to write and read MP4 videos")
+
+
+def _probe(path: Path) -> Tuple[int, int, int]:
+    """Return the width and height [px] and the number of frames of the video in a file, as ffprobe reads them."""
+    command = [
+        "ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries",
+        "stream=width,height,nb_read_frames", "-of", "csv=p=0",
+        str(path)
+    ]
+    output = subprocess.run(command, capture_output=True, check=True, text=True).stdout
+    width, height, frames = (int(value) for value in output.strip().split(","))
+    return width, height, frames
 
 
 def _loaded_simulation(self_weight: bool = False) -> DEMSimulation:
@@ -51,6 +69,30 @@ class TestPlotting:
         """A stride below one must be rejected."""
         with pytest.raises(ValueError, match=re.escape("every must be at least 1, got 0.")):
             render_animation(_loaded_simulation(), str(tmp_path / "run.gif"), every=0)
+
+    @NEEDS_FFMPEG
+    def test_mp4_animation_draws_every_nth_frame(self, tmp_path: Path) -> None:
+        """An MP4 animation with a stride must hold every n-th recorded frame, at the even size that H.264 needs."""
+        sim = _loaded_simulation()
+        render_animation(sim, str(tmp_path / "run.mp4"), every=3)
+        width, height, frames = _probe(tmp_path / "run.mp4")
+        assert frames == len(range(0, len(sim.frames), 3))
+        assert width % 2 == 0 and height % 2 == 0
+
+    def test_animation_with_unknown_format_is_rejected(self, tmp_path: Path) -> None:
+        """An animation can only be written as a GIF or an MP4 video."""
+        path = str(tmp_path / "run.avi")
+        with pytest.raises(ValueError,
+                           match=re.escape(f"An animation is written as a .gif or an .mp4 file, got '{path}'.")):
+            render_animation(_loaded_simulation(), path)
+
+    def test_mp4_animation_without_ffmpeg_is_rejected(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An MP4 video cannot be encoded without ffmpeg."""
+        monkeypatch.setattr(FFMpegWriter, "isAvailable", lambda: False)
+        with pytest.raises(RuntimeError,
+                           match=re.escape("An .mp4 animation is encoded by ffmpeg, which was not found.")):
+            render_animation(_loaded_simulation(), str(tmp_path / "run.mp4"))
+        assert not (tmp_path / "run.mp4").exists()
 
     def test_snapshot_with_water_is_written(self, tmp_path: Path) -> None:
         """A snapshot of a simulation with water must be written, with the water drawn below its level."""
@@ -150,6 +192,26 @@ class TestPlotting3D:
         # the water of the section is redrawn on every frame
         render_animation(_footing_simulation_3d(Water(level=0.03)), str(tmp_path / "wet.gif"), section=0.02)
         assert (tmp_path / "wet.gif").stat().st_size > 0
+
+    @NEEDS_FFMPEG
+    def test_mp4_outputs_are_written(self, tmp_path: Path) -> None:
+        """The oblique view and the section must be written as MP4 videos, the oblique view cropped to an even size."""
+        sim = _footing_simulation_3d()
+        render_animation(sim, str(tmp_path / "run.mp4"), every=2)
+        render_animation(sim, str(tmp_path / "section.mp4"), section=0.025)
+        width, height, frames = _probe(tmp_path / "run.mp4")
+        assert frames == len(range(0, len(sim.frames), 2))
+        full = int(5.0 * plt.rcParams["figure.dpi"])
+        assert width < full and height < full
+        assert width % 2 == 0 and height % 2 == 0
+        assert _probe(tmp_path / "section.mp4")[2] == len(sim.frames)
+
+    @NEEDS_FFMPEG
+    def test_mp4_that_ffmpeg_cannot_write_is_rejected(self, tmp_path: Path) -> None:
+        """The reason that ffmpeg gives must be passed on when it cannot write the video of an oblique view."""
+        path = str(tmp_path / "missing" / "run.mp4")
+        with pytest.raises(RuntimeError, match=re.escape(f"ffmpeg could not write {path}: ") + ".*No such file"):
+            render_animation(_footing_simulation_3d(), path)
 
     def test_views_without_frames_are_rejected(self, tmp_path: Path) -> None:
         """A 3D simulation that has not run has nothing to draw, in an oblique view or in a section."""

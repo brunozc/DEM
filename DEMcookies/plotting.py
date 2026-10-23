@@ -7,12 +7,14 @@ simulation; a 3D domain extruded from a polygon has that polygon as its section.
 
 import io
 import math
+import os
+import subprocess
 from typing import List, Optional, Sequence, Tuple, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
-from matplotlib.animation import FuncAnimation, PillowWriter
+from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter
 from matplotlib.artist import Artist
 from matplotlib.cm import ScalarMappable
 from matplotlib.collections import EllipseCollection, LineCollection, PathCollection
@@ -578,8 +580,33 @@ class _FramePainter3D:
 Painter = Union[_FramePainter, _SectionPainter, _FramePainter3D]
 
 
-def _save_cropped_gif(painter: _FramePainter3D, indices: Sequence[int], path: str, fps: int) -> None:
-    """Write frames as an animated GIF, each cropped to the part of the figure that the first one draws on.
+def _encode_mp4(images: Sequence[Image.Image], path: str, fps: int) -> None:
+    """Encode frames as an H.264 video with ffmpeg.
+
+    H.264 only encodes an even width and height, so a frame of odd size loses its last column or row of pixels.
+
+    Args:
+        images: frames of the video, all of one size.
+        path: output file [MP4].
+        fps: frames per second of the video.
+
+    Raises:
+        RuntimeError: if ffmpeg fails to write the video.
+    """
+    width, height = (size - size % 2 for size in images[0].size)
+    # yuv420p is the pixel format that most players can show
+    command = [
+        FFMpegWriter.bin_path(), "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgba", "-s",
+        f"{width}x{height}", "-r", f"{fps}", "-i", "pipe:", "-vcodec", "h264", "-pix_fmt", "yuv420p", path
+    ]
+    frames = b"".join(image.crop((0, 0, width, height)).tobytes() for image in images)
+    result = subprocess.run(command, input=frames, capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg could not write {path}: {result.stderr.decode(errors='replace').strip()}")
+
+
+def _save_cropped(painter: _FramePainter3D, indices: Sequence[int], path: str, fps: int) -> None:
+    """Write frames as a GIF or an MP4 video, each cropped to the part of the figure that the first one draws on.
 
     A 3D view is drawn in a square of the figure whatever the shape of the domain, so a slender or a flat domain
     leaves blank bands around it, which an animation cannot trim frame by frame as a snapshot can.
@@ -587,8 +614,11 @@ def _save_cropped_gif(painter: _FramePainter3D, indices: Sequence[int], path: st
     Args:
         painter: painter of the frames.
         indices: indices of the frames to draw.
-        path: output file [GIF].
+        path: output file [GIF or MP4], whose extension chooses the format.
         fps: frames per second of the animation.
+
+    Raises:
+        RuntimeError: if ffmpeg fails to write an MP4 video.
     """
     figure = painter.figure
     dpi = figure.dpi
@@ -606,7 +636,10 @@ def _save_cropped_gif(painter: _FramePainter3D, indices: Sequence[int], path: st
                    min(width, math.ceil(tight.x1 * dpi)), min(height, math.ceil(height - tight.y0 * dpi)))
         image = Image.frombuffer("RGBA", (width, height), buffer.getvalue(), "raw", "RGBA", 0, 1)
         images.append(image.crop(box))
-    images[0].save(path, save_all=True, append_images=images[1:], duration=int(1000 / fps), loop=0)
+    if path.lower().endswith(".mp4"):
+        _encode_mp4(images, path, fps)
+    else:
+        images[0].save(path, save_all=True, append_images=images[1:], duration=int(1000 / fps), loop=0)
 
 
 def _painter(sim: DEMSimulation, width: float, section: Optional[float]) -> Painter:
@@ -640,11 +673,14 @@ def render_animation(sim: DEMSimulation,
                      fps: int = 25,
                      every: int = 1,
                      section: Optional[float] = None) -> None:
-    """Write an animated GIF of the recorded frames, with the particles coloured by speed.
+    """Write an animation of the recorded frames, with the particles coloured by speed.
+
+    The extension of the path chooses the format: an animated GIF, or an H.264 MP4 video, which ffmpeg encodes and
+    which keeps a long run much smaller than a GIF.
 
     Args:
         sim: simulation whose frames are drawn.
-        path: output file [GIF].
+        path: output file [GIF or MP4].
         fps: frames per second of the animation.
         every: draw every n-th recorded frame, which keeps the animation of a long run short.
         section: z coordinate of a vertical section through a 3D simulation [m]; None draws a 3D simulation in an
@@ -652,19 +688,29 @@ def render_animation(sim: DEMSimulation,
 
     Raises:
         ValueError: if every is not positive.
+        ValueError: if the path does not end in .gif or .mp4.
+        RuntimeError: if an MP4 video is asked for and ffmpeg is not found.
         ValueError: if a section is asked for a 2D simulation.
         ValueError: if the simulation has no recorded frames.
         ValueError: if the section plane does not cut the domain.
+        RuntimeError: if ffmpeg fails to write the MP4 video of an oblique 3D view.
     """
     if every < 1:
         raise ValueError(f"every must be at least 1, got {every}.")
+    extension = os.path.splitext(path)[1].lower()
+    if extension not in (".gif", ".mp4"):
+        raise ValueError(f"An animation is written as a .gif or an .mp4 file, got '{path}'.")
+    if extension == ".mp4" and not FFMpegWriter.isAvailable():
+        raise RuntimeError("An .mp4 animation is encoded by ffmpeg, which was not found.")
     painter = _painter(sim, 5.0, section)
     indices = range(0, len(painter.frames), every)
     if isinstance(painter, _FramePainter3D):
-        _save_cropped_gif(painter, indices, path, fps)
+        _save_cropped(painter, indices, path, fps)
     else:
         animation = FuncAnimation(painter.figure, painter.draw, frames=indices, interval=1000 // fps, blit=False)
-        animation.save(path, writer=PillowWriter(fps=fps))
+        # matplotlib rounds the figure to an even size in pixels, which H.264 needs
+        writer = PillowWriter(fps=fps) if extension == ".gif" else FFMpegWriter(fps=fps)
+        animation.save(path, writer=writer)
     plt.close(painter.figure)
 
 
