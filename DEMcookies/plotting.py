@@ -2,7 +2,8 @@
 
 A 2D simulation is drawn in its plane. A 3D simulation is drawn in an oblique view of the whole domain, or as a
 vertical section z = const through it, which shows the particles that the plane cuts as circles and looks like a 2D
-simulation; a 3D domain extruded from a polygon has that polygon as its section.
+simulation; a 3D domain extruded from a polygon has that polygon as its section. Polygonal and polyhedral particles
+are drawn as their outlines, their faces, or the polygons that the section plane cuts out of them.
 """
 
 import io
@@ -17,7 +18,7 @@ import numpy.typing as npt
 from matplotlib.animation import FFMpegWriter, FuncAnimation, PillowWriter
 from matplotlib.artist import Artist
 from matplotlib.cm import ScalarMappable
-from matplotlib.collections import EllipseCollection, LineCollection, PathCollection
+from matplotlib.collections import EllipseCollection, LineCollection, PathCollection, PolyCollection
 from matplotlib.colors import Normalize
 from matplotlib.patches import Polygon
 from matplotlib.ticker import MaxNLocator
@@ -96,6 +97,80 @@ def _facet_label(indices: Tuple[int, ...], name: str) -> str:
     if list(indices) == list(range(indices[0], indices[-1] + 1)):
         return f"{name}s {indices[0]}-{indices[-1]}"
     return f"{name}s " + ", ".join(str(index) for index in indices)
+
+
+def _spheres(frame: Frame) -> npt.NDArray[np.bool_]:
+    """Whether each particle of a frame is a sphere, shape (n,)."""
+    spheres = np.ones(frame.radii.size, dtype=bool)
+    spheres[frame.polytopes()[0]] = False
+    return spheres
+
+
+def _outlines(frame: Frame) -> Tuple[npt.NDArray[np.int64], List[npt.NDArray[np.float64]]]:
+    """Polygonal particles of a 2D frame and their outlines.
+
+    Args:
+        frame: the frame.
+
+    Returns:
+        The indices of the polygons, and the vertices of each in order, shape (v, 2) [m].
+    """
+    rows, vertices = frame.polytopes()
+    if rows.size == 0 or frame.shapes is None:
+        return rows, []
+    counts = frame.shapes.vertex_count[rows]
+    return rows, [vertices[k, :counts[k]] for k in range(rows.size)]
+
+
+def _faces(frame: Frame) -> Tuple[npt.NDArray[np.int64], List[npt.NDArray[np.float64]]]:
+    """Faces of the polyhedral particles of a 3D frame.
+
+    Args:
+        frame: the frame.
+
+    Returns:
+        The particle of each face, and the vertices of the face in order, shape (m, 3) [m].
+    """
+    rows, vertices = frame.polytopes()
+    if rows.size == 0 or frame.shapes is None:
+        return rows, []
+    table = frame.shapes
+    # padding faces have a zero normal, and every face is padded with copies of its last vertex
+    particle, face = np.nonzero(np.any(table.normals[rows] != 0.0, axis=2))
+    loops = table.faces[rows][particle, face]
+    counts = np.argmax(loops == loops[:, -1:], axis=1) + 1
+    return rows[particle], [vertices[p, loop[:count]] for p, loop, count in zip(particle, loops, counts)]
+
+
+def _sections(frame: Frame, level: float) -> Tuple[npt.NDArray[np.int64], List[npt.NDArray[np.float64]]]:
+    """Polygons that the plane z = level cuts out of the polyhedral particles of a 3D frame.
+
+    Args:
+        frame: the frame.
+        level: z coordinate of the plane [m].
+
+    Returns:
+        The particles that the plane cuts, and the vertices (x, y) of each section in order, shape (m, 2) [m].
+    """
+    rows, vertices = frame.polytopes()
+    if rows.size == 0 or frame.shapes is None:
+        return rows, []
+    edges = frame.shapes.edges[rows]
+    cut: List[int] = []
+    polygons: List[npt.NDArray[np.float64]] = []
+    for k in range(rows.size):
+        start, end = vertices[k, edges[k, :, 0]], vertices[k, edges[k, :, 1]]
+        crossing = (start[:, 2] - level) * (end[:, 2] - level) < 0.0
+        if np.count_nonzero(crossing) < 3:
+            continue
+        a, b = start[crossing], end[crossing]
+        points = a + ((level - a[:, 2]) / (b[:, 2] - a[:, 2]))[:, None] * (b - a)
+        # the section of a convex body is convex, so its corners run around their mean
+        centre = points.mean(axis=0)
+        order = np.argsort(np.arctan2(points[:, 1] - centre[1], points[:, 0] - centre[0]))
+        cut.append(int(rows[k]))
+        polygons.append(points[order, :2])
+    return np.array(cut, dtype=np.int64), polygons
 
 
 def _speed_norm(frames: Sequence[Frame]) -> Normalize:
@@ -221,7 +296,7 @@ class _FramePainter:
             raise ValueError("A plane view can only be drawn of a two-dimensional simulation.")
         x_min, y_min, x_max, y_max = geometry.bounding_box
         margin = 0.02 * max(x_max - x_min, y_max - y_min)
-        tops = [float((f.positions[:, 1] + f.radii).max()) for f in self.frames if f.radii.size]
+        tops = [f.top() for f in self.frames if f.radii.size]
         y_top = max([y_max] + tops) + margin
         self.norm = _speed_norm(self.frames)
 
@@ -258,7 +333,7 @@ class _FramePainter:
         mappable = ScalarMappable(norm=self.norm, cmap="viridis")
         mappable.set_array([])
         self.figure.colorbar(mappable, ax=self.ax, label="speed [m/s]", shrink=0.8)
-        self.particles: List[EllipseCollection] = []
+        self.particles: List[Union[EllipseCollection, PolyCollection]] = []
 
     def draw(self, index: int) -> List[Artist]:
         """Draw one frame.
@@ -273,20 +348,26 @@ class _FramePainter:
             collection.remove()
         self.particles.clear()
         frame = self.frames[index]
-        diameters = 2.0 * frame.radii
+        spheres = _spheres(frame)
+        diameters = 2.0 * frame.radii[spheres]
         circles = EllipseCollection(widths=diameters,
                                     heights=diameters,
-                                    angles=np.zeros(frame.radii.size),
+                                    angles=np.zeros(diameters.size),
                                     units="xy",
-                                    offsets=frame.positions,
+                                    offsets=frame.positions[spheres],
                                     offset_transform=self.ax.transData,
                                     cmap="viridis",
                                     norm=self.norm,
                                     edgecolor="k",
                                     linewidth=0.3)
-        circles.set_array(frame.speeds)
+        circles.set_array(frame.speeds[spheres])
         self.ax.add_collection(circles)
         self.particles.append(circles)
+        rows, outlines = _outlines(frame)
+        polygons = PolyCollection(outlines, cmap="viridis", norm=self.norm, edgecolor="k", linewidth=0.3)
+        polygons.set_array(frame.speeds[rows])
+        self.ax.add_collection(polygons)
+        self.particles.append(polygons)
         for body, segments in zip(self.bodies, frame.platens):
             body.set_segments(list(segments))
         if frame.water_level is not None:
@@ -296,7 +377,7 @@ class _FramePainter:
             self.water.set_xy(wet if wet.shape[0] >= 3 else np.zeros((0, 2)))
             self.water.set_visible(wet.shape[0] >= 3)
         self.title.set_text(f"{frame.phase}   t = {frame.time:.3f} s   N = {frame.radii.size}")
-        return [circles, self.title, self.water, *self.bodies]
+        return [circles, polygons, self.title, self.water, *self.bodies]
 
 
 class _SectionPainter:
@@ -330,7 +411,7 @@ class _SectionPainter:
         self.tolerance = 1.0e-9 * float(np.max(high - low))
         x_min, y_min, x_max, y_max = float(low[0]), float(low[1]), float(high[0]), float(high[1])
         margin = 0.02 * max(x_max - x_min, y_max - y_min)
-        tops = [float((f.positions[:, 1] + f.radii).max()) for f in self.frames if f.radii.size]
+        tops = [f.top() for f in self.frames if f.radii.size]
         y_top = max([y_max] + tops) + margin
         self.norm = _speed_norm(self.frames)
 
@@ -361,7 +442,7 @@ class _SectionPainter:
         mappable = ScalarMappable(norm=self.norm, cmap="viridis")
         mappable.set_array([])
         self.figure.colorbar(mappable, ax=self.ax, label="speed [m/s]", shrink=0.8)
-        self.particles: List[EllipseCollection] = []
+        self.particles: List[Union[EllipseCollection, PolyCollection]] = []
 
     def draw(self, index: int) -> List[Artist]:
         """Draw one frame.
@@ -378,7 +459,7 @@ class _SectionPainter:
         frame = self.frames[index]
         # a sphere at a distance dz from the plane cuts it in a circle of radius sqrt(R^2 - dz^2)
         depth = frame.positions[:, 2] - self.section
-        cut = np.abs(depth) < frame.radii
+        cut = (np.abs(depth) < frame.radii) & _spheres(frame)
         diameters = 2.0 * np.sqrt(frame.radii[cut]**2 - depth[cut]**2)
         circles = EllipseCollection(widths=diameters,
                                     heights=diameters,
@@ -393,6 +474,11 @@ class _SectionPainter:
         circles.set_array(frame.speeds[cut])
         self.ax.add_collection(circles)
         self.particles.append(circles)
+        rows, outlines = _sections(frame, self.section)
+        sections = PolyCollection(outlines, cmap="viridis", norm=self.norm, edgecolor="k", linewidth=0.3)
+        sections.set_array(frame.speeds[rows])
+        self.ax.add_collection(sections)
+        self.particles.append(sections)
         for body, current in zip(self.bodies, frame.platens):
             body.set_segments([(start[:2], end[:2]) for face in current
                                for start, end in _plane_crossings(face, 2, self.section)])
@@ -417,7 +503,7 @@ class _SectionPainter:
                     self.water.append(patch)
         self.title.set_text(f"{frame.phase}   t = {frame.time:.3f} s   N = {frame.radii.size}   "
                             f"z = {self.section:.3g} m")
-        return [circles, self.title, *self.water, *self.bodies]
+        return [circles, sections, self.title, *self.water, *self.bodies]
 
 
 class _FramePainter3D:
@@ -442,7 +528,7 @@ class _FramePainter3D:
             raise ValueError("An oblique view can only be drawn of a three-dimensional simulation.")
         self.geometry = geometry
         low, high = geometry.bounds
-        tops = [float((f.positions[:, 1] + f.radii).max()) for f in self.frames if f.radii.size]
+        tops = [f.top() for f in self.frames if f.radii.size]
         high[1] = max([float(high[1])] + tops)
         self.tolerance = 1.0e-9 * float(np.max(high - low))
         self.norm = _speed_norm(self.frames)
@@ -508,7 +594,7 @@ class _FramePainter3D:
         # the layout is final once drawn, which fixes the scale of the projection
         self.figure.canvas.draw()
         self.points_per_metre = self.__points_per_metre()
-        self.particles: List[PathCollection] = []
+        self.particles: List[Union[PathCollection, Poly3DCollection]] = []
 
     def __display(self, points: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
         """Position of points on the figure, through the current projection of the axes.
@@ -548,12 +634,13 @@ class _FramePainter3D:
             collection.remove()
         self.particles.clear()
         frame = self.frames[index]
-        x, y, z = frame.positions.T
+        round_ones = _spheres(frame)
+        x, y, z = frame.positions[round_ones].T
         spheres = self.ax.scatter(x,
                                   y,
                                   z,
-                                  s=(2.0 * frame.radii * self.points_per_metre)**2,
-                                  c=frame.speeds,
+                                  s=(2.0 * frame.radii[round_ones] * self.points_per_metre)**2,
+                                  c=frame.speeds[round_ones],
                                   cmap="viridis",
                                   norm=self.norm,
                                   edgecolors="k",
@@ -561,6 +648,11 @@ class _FramePainter3D:
                                   depthshade=True,
                                   zorder=4)
         self.particles.append(spheres)
+        owner, faces = _faces(frame)
+        solids = Poly3DCollection(faces, cmap="viridis", norm=self.norm, edgecolors="k", linewidths=0.2, zorder=4)
+        solids.set_array(frame.speeds[owner])
+        self.ax.add_collection3d(solids, autolim=False)
+        self.particles.append(solids)
         for body, current in zip(self.bodies, frame.platens):
             body.set_verts(list(current))
         wetted: List[npt.NDArray[np.float64]] = []
@@ -574,7 +666,7 @@ class _FramePainter3D:
         self.water.set_verts(wetted)
         self.surface.set_verts(surface)
         self.title.set_text(f"{frame.phase}   t = {frame.time:.3f} s   N = {frame.radii.size}")
-        return [spheres, self.title, self.water, self.surface, *self.bodies]
+        return [spheres, solids, self.title, self.water, self.surface, *self.bodies]
 
 
 Painter = Union[_FramePainter, _SectionPainter, _FramePainter3D]

@@ -8,7 +8,8 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
-from DEMcookies.contact import ContactForces, HertzMindlinModel, MaterialProperties, RollingMoments, rayleigh_time_step
+from DEMcookies.contact import (ContactForces, HertzMindlinModel, MaterialProperties, RollingMoments,
+                                overlap_contact_radius, rayleigh_time_step)
 
 
 def _material(restitution: float = 1.0, friction: float = 0.5, rolling_friction: float = 0.0) -> MaterialProperties:
@@ -295,3 +296,104 @@ class TestRollingResistance3D:
         _, moments = _rolling_3d(model, (0.0, 1.0, 0.0), (5.0, 0.0, 5.0), (1.0e-3, 0.0, 0.0), overlap=-1.0e-5)
         assert_allclose(moments.moment, 0.0, atol=1e-30)
         assert_allclose(moments.rolling_spring, 0.0, atol=1e-30)
+
+
+class TestOverlapContacts:
+    """Tests of the contact law of polygonal and polyhedral particles."""
+
+    def test_contact_radius_keeps_the_ratio_of_spheres(self) -> None:
+        """The contact radius from the rim of the overlap of two spheres must be the Hertz contact radius."""
+        radius, overlap = 0.005, 1.0e-5
+        rim_sq = 2.0 * radius * overlap
+        assert_allclose(overlap_contact_radius(np.array([math.pi * rim_sq]), 3), math.sqrt(radius * overlap))
+        assert_allclose(overlap_contact_radius(np.array([2.0 * math.sqrt(rim_sq)]), 2), math.sqrt(radius * overlap))
+
+    @pytest.mark.parametrize("dimension", [2, 3])
+    def test_overlap_of_two_spheres_gives_the_hertz_force(self, dimension: int) -> None:
+        """Fed with the overlap of two spheres, the law must give the Hertz force of their overlap."""
+        model = HertzMindlinModel(_material())
+        radius, overlap = 0.005, 1.0e-5
+        rim = math.sqrt(2.0 * radius * overlap)
+        if dimension == 3:
+            # a lens of volume pi R* delta^2 with a rim of area pi a^2
+            size, measure = math.pi * rim * rim, math.pi * radius * overlap**2
+        else:
+            # a lens of area 4/3 a delta across a chord of 2 a
+            size, measure = 2.0 * rim, 4.0 / 3.0 * rim * overlap
+        normal = np.zeros((1, dimension))
+        normal[0, 1] = 1.0
+        forces = model.evaluate_overlap(normal, np.array([measure / size]),
+                                        overlap_contact_radius(np.array([size]), dimension), np.zeros((1, dimension)),
+                                        np.zeros((1, dimension)), 1.0e-5, np.array([1.0]))
+        hertz = model.evaluate(normal, np.array([overlap]), np.zeros((1, dimension)), np.zeros((1, dimension)), 1.0e-5,
+                               np.array([radius]), np.array([1.0]))
+        assert_allclose(forces.normal_force, hertz.normal_force, rtol=1e-12)
+        assert_allclose(forces.normal_stiffness, hertz.normal_stiffness, rtol=1e-12)
+
+    def test_flat_punch_is_close_to_boussinesq(self) -> None:
+        """A flat face pressed in by delta must carry within 6 % of the force 2 E* a delta of a flat punch."""
+        model = HertzMindlinModel(_material())
+        area, depth = 1.0e-4, 1.0e-6
+        forces = model.evaluate_overlap(np.array([[0.0, 1.0, 0.0]]), np.array([depth]),
+                                        overlap_contact_radius(np.array([area]), 3), np.zeros((1, 3)), np.zeros((1, 3)),
+                                        1.0e-5, np.array([1.0]))
+        punch = 2.0 * model.e_star * math.sqrt(area / math.pi) * depth
+        assert_allclose(forces.normal_force, punch, rtol=0.06)
+
+    def test_shares_of_a_split_contact_add_up(self) -> None:
+        """A contact split in two parts must carry the force, stiffness and damping of the whole."""
+        model = HertzMindlinModel(_material(restitution=0.3))
+        radius = np.array([0.004, 0.004, 0.004])
+        depth = np.array([2.0e-6, 2.0e-6, 2.0e-6])
+        share = np.array([1.0, 0.3, 0.7])
+        normal = np.tile([0.0, 1.0, 0.0], (3, 1))
+        velocity = np.tile([0.01, -0.02, 0.0], (3, 1))
+        forces = model.evaluate_overlap(normal, depth, radius, velocity, np.zeros((3, 3)), 1.0e-5, np.ones(3), share)
+        assert_allclose(forces.force[1] + forces.force[2], forces.force[0], rtol=1e-12)
+        assert_allclose(forces.normal_stiffness[1] + forces.normal_stiffness[2], forces.normal_stiffness[0])
+
+    def test_open_overlap_has_no_force(self) -> None:
+        """A contact without depth or contact radius must carry nothing and lose its spring."""
+        model = HertzMindlinModel(_material())
+        forces = model.evaluate_overlap(np.tile([0.0, 1.0], (2, 1)), np.array([0.0, 1.0e-6]), np.array([0.01, 0.0]),
+                                        np.zeros((2, 2)), np.ones((2, 2)), 1.0e-5, np.ones(2))
+        assert_allclose(forces.force, 0.0)
+        assert_allclose(forces.tangential_spring, 0.0)
+
+
+class TestTwisting:
+    """Tests of the twisting resistance of flat contacts."""
+
+    def _contact(self, model: HertzMindlinModel) -> ContactForces:
+        """Return a face contact of radius 4 mm pressed in by 2 microns, at rest."""
+        return model.evaluate_overlap(np.array([[0.0, 1.0, 0.0]]), np.array([2.0e-6]), np.array([0.004]),
+                                      np.zeros((1, 3)), np.zeros((1, 3)), 1.0e-5, np.array([1.0]))
+
+    def test_small_twist_is_elastic(self) -> None:
+        """A small stored twist must give the moment of the tangential stiffness spread over the contact disc."""
+        model = HertzMindlinModel(_material(friction=0.5))
+        contact = self._contact(model)
+        twist = 1.0e-6
+        moments = model.twisting(contact, np.zeros((1, 3)), np.array([[0.0, twist, 0.0]]), 0.0, np.array([0.004]),
+                                 np.array([1.0e-6]))
+        tangential = 4.0 * model.g_star / model.e_star * contact.normal_stiffness[0]
+        assert_allclose(moments.moment, [[0.0, -0.5 * tangential * 0.004**2 * twist, 0.0]])
+        assert_allclose(moments.rolling_spring, [[0.0, twist, 0.0]])
+
+    def test_large_twist_slips_at_the_friction_moment(self) -> None:
+        """A large twist must be capped at 2/3 mu F_n a, and the spring reset to that moment."""
+        model = HertzMindlinModel(_material(friction=0.5))
+        contact = self._contact(model)
+        moments = model.twisting(contact, np.zeros((1, 3)), np.array([[0.0, 1.0, 0.0]]), 0.0, np.array([0.004]),
+                                 np.array([1.0e-6]))
+        limit = 2.0 / 3.0 * 0.5 * contact.normal_force[0] * 0.004
+        assert_allclose(moments.moment, [[0.0, -limit, 0.0]])
+        tangential = 4.0 * model.g_star / model.e_star * contact.normal_stiffness[0]
+        assert_allclose(moments.rolling_spring, [[0.0, limit / (0.5 * tangential * 0.004**2), 0.0]])
+
+    def test_rolling_spin_does_not_twist(self) -> None:
+        """A spin about an axis in the contact plane must not twist the contact."""
+        model = HertzMindlinModel(_material())
+        moments = model.twisting(self._contact(model), np.array([[3.0, 0.0, -2.0]]), np.zeros((1, 3)), 1.0e-5,
+                                 np.array([0.004]), np.array([1.0e-6]))
+        assert_allclose(moments.moment, 0.0)

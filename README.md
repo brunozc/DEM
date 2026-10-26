@@ -2,16 +2,20 @@
 
 A small two- and three-dimensional Discrete Element Model (DEM) written in Python.
 
-DEMcookies is a soft-sphere code for granular materials. Spherical particles are rained into a polygonal (2D) or
-polyhedral (3D) container under gravity, the packing settles, and rigid bodies then load it with a prescribed,
-time-dependent force. The particles may sit in pore water, which buoys them, drags on them and, optionally, carries an
-excess pore pressure. The same code runs in two and in three dimensions; the geometry decides which.
+DEMcookies is a soft-particle code for granular materials. Spherical, polygonal (2D) or polyhedral (3D) particles are
+rained into a polygonal (2D) or polyhedral (3D) container under gravity, the packing settles, and rigid bodies then load
+it with a prescribed, time-dependent force. The particles may sit in pore water, which buoys them, drags on them and,
+optionally, carries an excess pore pressure. The same code runs in two and in three dimensions; the geometry decides
+which.
 
 ![Curved indenter pressed into a granular fill](manual/figures/indenter_final.png)
 
 ## Features
 
 - Spherical, polydisperse particles with uniformly distributed random radii, moving in a plane (2D) or in space (3D).
+- Convex polygonal (2D) and polyhedral (3D) particles, alone or mixed with spheres. Their contacts follow from the
+  region where two bodies overlap, with the Hertz-Mindlin law and a contact radius measured on that region, and flat
+  contacts also resist twisting.
 - Gravity ("raining") deposition to build the initial packing.
 - Hertz-Mindlin (no-slip) contact law with tangential history, viscous damping set by the coefficient of restitution,
   Coulomb friction and optional rolling resistance (in 3D, rolling is resisted and twisting is free).
@@ -94,6 +98,38 @@ Any closed polyhedron with planar faces can be built with `Geometry3D(vertices, 
 on the face it sweeps. `render_animation` and `render_frame` draw a 3D simulation in an oblique view, or, given
 `section=z`, as a vertical section that looks like the 2D pictures.
 
+### Angular grains: polygons and polyhedra
+
+Spheres roll past each other far too easily; rolling resistance mimics the interlocking of angular grains, and convex
+polygons (2D) and polyhedra (3D) represent it directly. A shape is the convex hull of a set of points, and the radius
+of a particle sets its size: a shaped particle of radius R has the area (2D) or the volume (3D) of the disc or sphere of
+radius R, so it has the same mass, and a grading of spheres can be replaced by shapes as it stands.
+
+```python
+from DEMcookies import ConvexPolygon, ConvexPolyhedron, Particle3D
+
+# rain a mix: each particle takes one of the shapes at random, in a random orientation; None is a sphere
+shapes = [ConvexPolygon.regular(6), ConvexPolygon.random(7, seed=1, aspect=1.4), None]
+sim = DEMSimulation(geometry, material, radius_range=(0.004, 0.02), shapes=shapes)
+
+# or place them yourself: a 3D particle is oriented by a quaternion (w, x, y, z)
+stone = ConvexPolyhedron.random(12, seed=3, aspect=(1.3, 1.0, 0.7))
+particle = Particle3D(0.1, 0.05, 0.1, radius=0.015, shape=stone, orientation=(1.0, 0.0, 0.0, 0.0))
+```
+
+`ConvexPolygon.rectangle`, `ConvexPolygon.regular`, `ConvexPolyhedron.box`, `ConvexPolyhedron.tetrahedron` and
+`ConvexPolyhedron.octahedron` make simple shapes, and `random` the hull of random points on an ellipse or ellipsoid,
+e.g. for sand grains or ballast stones. `generate_lattice_particles` takes the same `shapes` list.
+
+Two convex bodies overlap in one convex region, from whose volume (area in 2D), centroid and contact surface the contact
+follows: the normal is the direction of the surface, the force acts at the centroid, and the Hertz-Mindlin law of the
+spheres applies with a contact radius measured on the overlap. For two spheres this gives the Hertz force, and it stays
+close to the exact force of a corner or a flat face. Polytopes get no rolling resistance; contacts between faces resist
+twisting instead. Polyhedra rotate as rigid bodies with their full inertia tensor. A sphere touching a polytope presses
+on its closest point, and a polytope pressing on a wall overlaps the solid behind the wall. Contacts of polytopes cost
+several times more than those of spheres; the sections "Polygonal and polyhedral particles" of the manual give the
+formulation and the numerics.
+
 ### ParaView
 
 A `VTKWriter` exports a simulation, 2D or 3D, to VTK files for [ParaView](https://www.paraview.org). Attached to a
@@ -107,7 +143,7 @@ sim.add_observer(VTKWriter("output/vtk", save_every_n_steps=500))
 sim.rain_until_full(RainSettings(record_every=60))
 ```
 
-Every export adds a file to four time series, each listed with its simulation times in a `.pvd` collection:
+Every export adds a file to five time series, each listed with its simulation times in a `.pvd` collection:
 
 | Collection | Content |
 | --- | --- |
@@ -115,12 +151,13 @@ Every export adds a file to four time series, each listed with its simulation ti
 | `contacts.pvd` | a line per contact, between the centres of two particles or from a centre to a facet, with its normal force, tangential force and overlap |
 | `boundary.pvd` | the facets of the domain at their current position, with their boundary condition and the force and pressure of the particles on them |
 | `water.pvd` | the free surface of the water |
+| `shapes.pvd` | the outline of every polygon, or the faces of every polyhedron, with the velocity, number of contacts and mean stress of its particle; empty for spheres |
 
 The writer also leaves `paraview_setup.py` in the folder. Run it from the ParaView Python shell (View > Python Shell >
 Run Script), or start ParaView with `paraview --script=output/vtk/paraview_setup.py`. It shows two views with linked
-cameras at the end of the run: the particles as spheres of their true size coloured by their speed, and the force
-chains, the contacts drawn as tubes that grow thicker with the normal force, with the facets coloured by the pressure on
-them.
+cameras at the end of the run: the particles as spheres of their true size, or as their polygons and polyhedra, coloured
+by their speed, and the force chains, the contacts drawn as tubes that grow thicker with the normal force, with the
+facets coloured by the pressure on them.
 
 Exporting never changes the run. A writer pickled with its simulation, e.g. in a checkpoint, carries on with its
 series when the simulation is resumed. `VTKWriter("output/vtk").write(sim)` exports the current state of any
@@ -141,10 +178,11 @@ The [examples/](examples/) folder holds more involved cases. Each writes its fig
 | [upward_seepage.py](examples/upward_seepage.py) | Upward seepage through a submerged column, from the quick condition to fluidization. |
 | [consolidation.py](examples/consolidation.py) | Consolidation of a submerged column under a sudden load, compared with Terzaghi's theory. |
 | [ballast_cyclic.py](examples/ballast_cyclic.py) | Cyclic loading of railway ballast under a sleeper: dry, half submerged and saturated. Runs fifteen parallel processes, about twenty minutes on sixteen cores. |
+| [angular_grains.py](examples/angular_grains.py) | The same strip footing on free discs, on discs with rolling resistance and on angular polygons, and their load-settlement curves (`--peak` sets the peak load [N]). |
 
 ### Three dimensions
 
-Each of these runs in a few minutes.
+Each of these runs in a few minutes, apart from the polyhedra of `angular_grains_3d.py`, which take about twelve.
 
 | Script | Problem |
 | --- | --- |
@@ -152,6 +190,7 @@ Each of these runs in a few minutes.
 | [cone_penetration_3d.py](examples/cone_penetration_3d.py) | A 60° cone of twelve faces pushed into a granular bed; the top of the box around it is made of two non-convex faces (`--peak` sets the peak load [N]). |
 | [hopper_discharge_3d.py](examples/hopper_discharge_3d.py) | A bin with a hopper whose trap door opens: the grains drain out through the outlet at a constant rate. |
 | [upward_seepage_3d.py](examples/upward_seepage_3d.py) | Upward seepage through a submerged column, from the quick condition to fluidization, the 3D counterpart of `upward_seepage.py`. |
+| [angular_grains_3d.py](examples/angular_grains_3d.py) | Square footing on a bed of irregular polyhedral stones, with optional ParaView output that shows their faces (`--save-every-n-steps`). |
 
 Their animations, kept in [examples/videos/](examples/videos/), show the particles coloured by speed:
 
@@ -160,6 +199,8 @@ Their animations, kept in [examples/videos/](examples/videos/), show the particl
 | ![Square footing pressed into a granular bed](examples/videos/square_footing_3d.gif) | ![Cone pushed into a granular bed](examples/videos/cone_penetration_3d.gif) |
 | **Hopper discharge** | **Upward seepage** |
 | ![Grains draining from a hopper through its trap door](examples/videos/hopper_discharge_3d.gif) | ![Submerged column fluidized by an upward flow](examples/videos/upward_seepage_3d.gif) |
+| **Angular stones** | |
+| ![Square footing pressed into a bed of polyhedral stones](examples/videos/angular_grains_3d.gif) | |
 
 ### Three-dimensional ballast study
 

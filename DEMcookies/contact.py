@@ -17,6 +17,11 @@ Rolling resistance stands in for the shape of the grains. Round particles roll p
 packing of discs or spheres is much weaker than one of angular grains such as railway ballast; resisting the relative
 rotation of the particles in contact restores much of that strength.
 
+Polygonal and polyhedral particles follow the same law, with the contact radius ``a`` measured on the region where
+the two bodies overlap rather than computed from their curvatures (``evaluate_overlap``). Their shape resists rolling
+by itself, so they get no rolling resistance; the flat contact between two faces resists twisting instead, which a
+spherical point contact does not (``twisting``).
+
 All particles and boundaries share one material, so the effective moduli ``E*`` and ``G*`` and the damping factor
 ``beta`` are computed once. The effective radius ``R*``, the effective mass ``m*`` and the friction coefficient may
 differ from contact to contact and are supplied by the solver. Contacts are evaluated in batches.
@@ -84,6 +89,26 @@ class MaterialProperties:
         return self.youngs_modulus / (2.0 * (1.0 + self.poisson_ratio))
 
 
+def overlap_contact_radius(size: npt.NDArray[np.float64], dimension: int) -> npt.NDArray[np.float64]:
+    """Contact radius of contacts between polytopes, from the size of their contact surface.
+
+    The overlap of two spheres is a lens whose rim has the radius sqrt(2 R* delta), and whose section through the
+    centres has a chord of twice that; the Hertz contact radius is sqrt(R* delta). The radius of polytope contacts
+    keeps that ratio: a = sqrt(A / (2 pi)) for a contact surface of area A in 3D, and a = L / (2 sqrt 2) for a chord of
+    length L in 2D.
+
+    Args:
+        size: area (3D) or chord length (2D) of each contact surface, shape (k,) [m^2 or m].
+        dimension: number of space dimensions, 2 or 3.
+
+    Returns:
+        The contact radii, shape (k,) [m].
+    """
+    if dimension == 2:
+        return np.asarray(size / (2.0 * math.sqrt(2.0)))
+    return np.asarray(np.sqrt(np.maximum(size, 0.0) / (2.0 * math.pi)))
+
+
 def rayleigh_time_step(material: MaterialProperties, min_radius: float, safety: float = 0.2) -> float:
     """Return a stable integration time step.
 
@@ -134,10 +159,11 @@ class ContactForces:
 
 @dataclass(frozen=True, eq=False)
 class RollingMoments:
-    """Result of evaluating the rolling resistance of a batch of contacts.
+    """Result of evaluating the rolling resistance, or the twisting resistance, of a batch of contacts.
 
     Attributes:
-        moment: rolling moment on body i; body j receives the opposite, shape (k,) in 2D or (k, 3) in 3D [N m].
+        moment: rolling (or twisting) moment on body i; body j receives the opposite, shape (k,) in 2D or (k, 3) in
+            3D [N m].
         rolling_spring: updated relative rotation stored in each contact, of the shape of the moment [rad].
     """
 
@@ -198,18 +224,93 @@ class HertzMindlinModel:
             The contact forces on body i and the updated tangential springs. Contacts with a non-positive overlap
             get zero force and a reset spring.
         """
-        mu = self.friction if friction is None else friction
         in_contact = overlap > 0.0
         overlap = np.where(in_contact, overlap, 0.0)
 
         contact_radius = np.sqrt(effective_radius * overlap)
         s_n = 2.0 * self.e_star * contact_radius
         s_t = 8.0 * self.g_star * contact_radius
+        # Hertz spring: 2/3 S_n delta = 4/3 E* sqrt(R*) delta^1.5
+        return self.__respond(normal, (2.0 / 3.0) * s_n * overlap, s_n, s_t, in_contact, relative_velocity,
+                              tangential_spring, time_step, effective_mass, friction)
+
+    def evaluate_overlap(self,
+                         normal: npt.NDArray[np.float64],
+                         depth: npt.NDArray[np.float64],
+                         contact_radius: npt.NDArray[np.float64],
+                         relative_velocity: npt.NDArray[np.float64],
+                         tangential_spring: npt.NDArray[np.float64],
+                         time_step: float,
+                         effective_mass: npt.NDArray[np.float64],
+                         share: Optional[npt.NDArray[np.float64]] = None,
+                         friction: Optional[Union[float, npt.NDArray[np.float64]]] = None) -> ContactForces:
+        """Evaluate a batch of k contacts of polygonal or polyhedral particles from the region where they overlap.
+
+        Polytopes have no curvature to compute the contact radius from, so it is measured on the overlap instead
+        (``overlap_contact_radius``), and the law is otherwise that of Hertz and Mindlin: S_n = 2 E* a and
+        S_t = 8 G* a, with the same damping and friction. The elastic normal force is kappa S_n delta, with delta
+        the mean depth of the overlap, its volume over its contact area (its area over its chord in 2D), and
+        kappa = 4/3 in 3D and 1 in 2D. For two spheres this is the Hertz force, and it is within a few percent of
+        the exact force of a cone pressed into a plane and of a flat punch.
+
+        A contact surface split between several coplanar facets is one contact: every part has the contact radius of
+        the whole surface, and the share of the stiffness and of the mass that its area makes up, so that the parts
+        add up to the force, the stiffness and the damping of the whole.
+
+        Args:
+            normal: unit normals pointing from body j towards body i, shape (k, d).
+            depth: mean depth of each overlap, positive in contact, shape (k,) [m].
+            contact_radius: contact radius of each contact, shape (k,) [m].
+            relative_velocity: velocity of the contact point of i relative to j, shape (k, d) [m/s].
+            tangential_spring: stored tangential displacements, shape (k, d) [m].
+            time_step: increment over which the relative velocity is accumulated into the spring; zero re-evaluates
+                the forces of the current state without advancing the history [s].
+            effective_mass: effective masses m*, shape (k,) [kg].
+            share: fraction of its contact surface that each contact makes up, shape (k,); None for whole contacts.
+            friction: Coulomb friction coefficient per contact or for all contacts; None uses the material's.
+
+        Returns:
+            The contact forces on body i and the updated tangential springs. Contacts with a non-positive depth or
+            contact radius get zero force and a reset spring.
+        """
+        in_contact = (depth > 0.0) & (contact_radius > 0.0)
+        depth = np.where(in_contact, depth, 0.0)
+        weight = np.where(in_contact, contact_radius if share is None else contact_radius * share, 0.0)
+        s_n = 2.0 * self.e_star * weight
+        s_t = 8.0 * self.g_star * weight
+        kappa = 1.0 if normal.shape[1] == 2 else 4.0 / 3.0
+        mass = effective_mass if share is None else effective_mass * share
+        return self.__respond(normal, kappa * s_n * depth, s_n, s_t, in_contact, relative_velocity, tangential_spring,
+                              time_step, mass, friction)
+
+    def __respond(self, normal: npt.NDArray[np.float64], elastic: npt.NDArray[np.float64], s_n: npt.NDArray[np.float64],
+                  s_t: npt.NDArray[np.float64], in_contact: npt.NDArray[np.bool_],
+                  relative_velocity: npt.NDArray[np.float64], tangential_spring: npt.NDArray[np.float64],
+                  time_step: float, effective_mass: npt.NDArray[np.float64],
+                  friction: Optional[Union[float, npt.NDArray[np.float64]]]) -> ContactForces:
+        """Add the damping and the tangential force to the elastic normal force of a batch of contacts.
+
+        Args:
+            normal: unit normals pointing from body j towards body i, shape (k, d).
+            elastic: elastic normal force, zero for open contacts, shape (k,) [N].
+            s_n: tangent normal stiffness, zero for open contacts, shape (k,) [N/m].
+            s_t: tangential stiffness, zero for open contacts, shape (k,) [N/m].
+            in_contact: whether each contact is closed, shape (k,).
+            relative_velocity: velocity of the contact point of i relative to j, shape (k, d) [m/s].
+            tangential_spring: stored tangential displacements, shape (k, d) [m].
+            time_step: increment over which the relative velocity is accumulated into the spring [s].
+            effective_mass: effective masses m*, shape (k,) [kg].
+            friction: Coulomb friction coefficient per contact or for all contacts; None uses the material's.
+
+        Returns:
+            The contact forces on body i and the updated tangential springs.
+        """
+        mu = self.friction if friction is None else friction
         damping = DAMPING_CONSTANT * self.beta
 
-        # normal force: Hertz spring (2/3 S_n delta = 4/3 E* sqrt(R*) delta^1.5) plus dashpot, never cohesive
+        # normal force: elastic spring plus dashpot, never cohesive
         v_n = np.einsum("ij,ij->i", relative_velocity, normal)
-        f_n = np.maximum((2.0 / 3.0) * s_n * overlap - damping * np.sqrt(s_n * effective_mass) * v_n, 0.0)
+        f_n = np.maximum(elastic - damping * np.sqrt(s_n * effective_mass) * v_n, 0.0)
 
         # tangential spring: rotate it into the current tangent plane, then add this step's sliding
         v_t = relative_velocity - v_n[:, None] * normal
@@ -279,6 +380,54 @@ class HertzMindlinModel:
         spring[loaded] = -moment[loaded] / stiffness[loaded]
         spring[stiffness <= 0.0] = 0.0
         return RollingMoments(moment=moment, rolling_spring=spring)
+
+    def twisting(self,
+                 contact: ContactForces,
+                 relative_spin: npt.NDArray[np.float64],
+                 twisting_spring: npt.NDArray[np.float64],
+                 time_step: float,
+                 contact_radius: npt.NDArray[np.float64],
+                 twisting_inertia: npt.NDArray[np.float64],
+                 friction: Optional[Union[float, npt.NDArray[np.float64]]] = None) -> RollingMoments:
+        """Evaluate the resistance to twisting of a batch of k 3D contacts between polytopes.
+
+        The flat contact between two faces resists a relative spin about its normal, as a spherical point contact
+        does not. Its tangential stiffness S_t, spread evenly over a disc of the contact radius a, gives the twisting
+        spring the stiffness k_t = S_t a^2 / 2; it is damped like the other springs, and its moment is capped at
+        2/3 mu F_n a, the friction moment of an even pressure on that disc. A capped spring is reset to the moment it
+        carries, as the rolling spring is.
+
+        Args:
+            contact: forces of the same contacts, from ``evaluate_overlap``.
+            relative_spin: angular velocity of body i minus that of body j, shape (k, 3) [rad/s].
+            twisting_spring: stored relative twist, a vector along the normal, shape (k, 3) [rad].
+            time_step: increment over which the relative spin is accumulated into the spring; zero re-evaluates the
+                moments of the current state without advancing the history [s].
+            contact_radius: contact radius of each contact, shape (k,) [m].
+            twisting_inertia: effective moment of inertia of the two bodies about the normal, shape (k,) [kg m^2].
+            friction: Coulomb friction coefficient per contact or for all contacts; None uses the material's.
+
+        Returns:
+            The twisting moments on body i, along the normals, and the updated springs. Open contacts get no moment
+            and a reset spring.
+        """
+        mu = self.friction if friction is None else friction
+        normal = contact.normal
+        # the tangential stiffness is 4 G* / E* times the normal stiffness, as for spheres
+        stiffness = 2.0 * (self.g_star / self.e_star) * contact.normal_stiffness * contact_radius**2
+        damping = DAMPING_CONSTANT * self.beta * np.sqrt(stiffness * twisting_inertia)
+        limit = (2.0 / 3.0) * mu * contact.normal_force * contact_radius
+        # only the spin about the normal twists the contact; the rest rolls the bodies over each other
+        spin = np.einsum("ij,ij->i", relative_spin, normal)
+        spring = np.einsum("ij,ij->i", twisting_spring, normal) + spin * time_step
+        moment = -stiffness * spring - damping * spin
+
+        twisting = np.abs(moment) > limit
+        loaded = twisting & (stiffness > 0.0)
+        moment[twisting] = np.sign(moment[twisting]) * np.broadcast_to(limit, moment.shape)[twisting]
+        spring[loaded] = -moment[loaded] / stiffness[loaded]
+        spring[stiffness <= 0.0] = 0.0
+        return RollingMoments(moment=moment[:, None] * normal, rolling_spring=spring[:, None] * normal)
 
     @staticmethod
     def __rolling_3d(normal: npt.NDArray[np.float64], relative_spin: npt.NDArray[np.float64],

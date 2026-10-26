@@ -5,23 +5,35 @@ engine: it keeps the particle state in arrays, finds particle contacts with a ce
 evaluates the Hertz-Mindlin forces between particles and against the solid facets of the domain, moves the loaded
 platens, and advances everything in time with velocity Verlet. It runs in two or in three dimensions, as set by the
 geometry: a polygon (``Geometry``) or a polyhedron (``Geometry3D``).
+
+The particles are spheres, or convex polygons (2D) and polyhedra (3D), in any mix. A contact between two spheres, or
+between a sphere and a facet, follows from the overlap of the spheres; a contact that involves a polytope follows
+from the region where the two bodies overlap (``DEMcookies.overlap``), or from the closest point of a polytope to a
+sphere. The neighbour list works on the spheres that bound the particles.
 """
 
 import math
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import numpy.typing as npt
 
 from .boundary import Open, Platen
-from .contact import ContactForces, HertzMindlinModel, MaterialProperties, RollingMoments, rayleigh_time_step
+from .contact import (ContactForces, HertzMindlinModel, MaterialProperties, RollingMoments, overlap_contact_radius,
+                      rayleigh_time_step)
 from .facets import FacetSet
 from .geometry3d import Domain
 from .water import PoreWater, Water, evaluate_at
-from .globals import ESCAPE_CHECK_INTERVAL, GEOMETRY_TOLERANCE, GlobalSettings
+from .globals import COPLANAR_TOLERANCE, ESCAPE_CHECK_INTERVAL, GEOMETRY_TOLERANCE, GlobalSettings
 from .neighbours import NeighbourList
-from .particle_generation import AnyParticle
+from .overlap import (Overlap, Polyhedra, polygon_distance, polygon_overlap, polygon_region_overlap,
+                      polyhedron_distance, polyhedron_overlap, polyhedron_region_overlap)
+from .particle_generation import AnyParticle, bounding_ratio, check_shapes
+from .polytopes import (PolytopePose, PolytopeTable, apply_inertia, frame_polygons, identity_orientations, place,
+                        random_orientations, rotate, rotation_matrices)
+from .regions import OPEN_BODY, FacetRegions, facet_regions
+from .shapes import Shape
 from .vectors import cross, norm, rotation_shape, scale, scatter_add, spin_cross
 
 
@@ -129,6 +141,10 @@ class Frame:
             of its last vertex, in 3D [m].
         phase: name of the stage the frame belongs to.
         water_level: height of the free surface of the water [m], or None without water.
+        orientations: orientation of every particle, angles, shape (n,), in 2D and quaternions, shape (n, 4), in 3D;
+            None if every particle is a sphere.
+        shapes: shapes of the particles in their body frames, shared with the simulation and the other frames, which
+            never change it; None if every particle is a sphere.
     """
 
     time: float
@@ -138,6 +154,32 @@ class Frame:
     platens: Tuple[npt.NDArray[np.float64], ...]
     phase: str
     water_level: Optional[float] = None
+    orientations: Optional[npt.NDArray[np.float64]] = None
+    shapes: Optional[PolytopeTable] = None
+
+    def polytopes(self) -> Tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
+        """Return the polygonal or polyhedral particles of the frame and their vertices in space.
+
+        Returns:
+            The indices of those particles, shape (p,), and their vertices, padded with copies of the first, shape
+            (p, v, d) [m]; both empty if every particle is a sphere.
+        """
+        if self.shapes is None or self.orientations is None:
+            d = self.positions.shape[1]
+            return np.zeros(0, dtype=np.int64), np.zeros((0, 0, d))
+        return frame_polygons(self.shapes, self.positions, self.orientations)
+
+    def top(self) -> float:
+        """Return the highest point of any particle, or -inf without particles [m]."""
+        spheres = np.ones(self.radii.size, dtype=bool)
+        tops = [-np.inf]
+        rows, vertices = self.polytopes()
+        if rows.size:
+            spheres[rows] = False
+            tops.append(float(vertices[..., 1].max()))
+        if np.any(spheres):
+            tops.append(float((self.positions[spheres, 1] + self.radii[spheres]).max()))
+        return max(tops)
 
 
 @dataclass
@@ -176,9 +218,10 @@ class ContactList:
         first: particle i of each contact, shape (k,).
         second: particle j of each contact, or the index in the geometry of the facet that particle i touches,
             shape (k,).
-        point: contact point, in the middle of the overlap, shape (k, d) [m].
+        point: contact point, in the middle of the overlap of two spheres and at the centroid of the overlap of
+            polytopes, shape (k, d) [m].
         normal: unit normal pointing from j towards i, shape (k, d).
-        overlap: normal overlap, shape (k,) [m].
+        overlap: normal overlap, shape (k,) [m]; between polytopes, the mean depth of their overlap.
         normal_force: magnitude of the normal force, shape (k,) [N].
         tangential_force: tangential force on particle i, shape (k, d) [N].
     """
@@ -205,9 +248,13 @@ class _ContactBatch:
         first: particle i of each contact.
         second: particle j of each contact, or the slot of the solid facet that particle i touches.
         normal: unit normal pointing from j towards i, shape (k, d).
-        overlap: normal overlap [m].
+        overlap: normal overlap, or mean depth of the overlap of polytopes [m].
         forces: forces of the contact law, with the updated tangential springs.
         rolling: rolling moments, with the updated rolling springs, or None without rolling resistance.
+        point: contact point, shape (k, d) [m].
+        levers: vectors from the centres of particles i and j to where the force acts, shape (k, d) each, the
+            second None for a facet; None for spheres, whose contact force acts at their radius against the normal.
+        slot: position of each contact in the neighbour list, for contacts between particles.
     """
 
     first: npt.NDArray[np.int64]
@@ -216,6 +263,9 @@ class _ContactBatch:
     overlap: npt.NDArray[np.float64]
     forces: ContactForces
     rolling: Optional[RollingMoments]
+    point: npt.NDArray[np.float64]
+    levers: Optional[Tuple[npt.NDArray[np.float64], Optional[npt.NDArray[np.float64]]]] = None
+    slot: Optional[npt.NDArray[np.int64]] = None
 
 
 Observer = Callable[["DEMSimulation"], None]
@@ -226,13 +276,20 @@ class DEMSimulation:
 
     The geometry sets the number of space dimensions d. Vectors have d components; rotations, angular velocities
     and torques are scalars about the out-of-plane axis in 2D and vectors in 3D. The y axis is vertical in both.
+    Particles are spheres, or convex polygons (2D) and polyhedra (3D), whose centre is their centroid and whose
+    radius is the equivalent radius of their shape, so that every particle has the mass of the sphere of its radius.
 
     Attributes:
         dimension: number of space dimensions, 2 or 3.
         pos: particle centres, shape (n, d) [m].
         vel: particle velocities, shape (n, d) [m/s].
         omega: particle angular velocities, shape (n,) in 2D or (n, 3) in 3D [rad/s].
-        radius: particle radii [m].
+        orientation: particle orientations, angles about the out-of-plane axis, shape (n,), in 2D and unit
+            quaternions (w, x, y, z), shape (n, 4), in 3D, which turn the body frame of a shape into space.
+        radius: particle radii [m]; the equivalent radius of a polygon or a polyhedron.
+        mass: particle masses [kg].
+        inertia: moments of inertia about the centre, shape (n,), in 2D and principal moments of inertia about the
+            axes of the body frame, shape (n, 3), in 3D [kg m^2].
         force: total force on each particle at the last evaluation, apart from the drag of the water, which is
             integrated implicitly, shape (n, d) [N].
         torque: total torque on each particle at the last evaluation, shape (n,) in 2D or (n, 3) in 3D [N m].
@@ -258,7 +315,8 @@ class DEMSimulation:
                  particles: Optional[Sequence[AnyParticle]] = None,
                  settings: Optional[GlobalSettings] = None,
                  dt: Optional[float] = None,
-                 water: Optional[Water] = None) -> None:
+                 water: Optional[Water] = None,
+                 shapes: Optional[Sequence[Optional[Shape]]] = None) -> None:
         """Set up the simulation.
 
         Args:
@@ -270,11 +328,19 @@ class DEMSimulation:
                 starts empty when None.
             settings: numerical settings; defaults to ``GlobalSettings()``.
             dt: time step [s]; defaults to a fraction of the Rayleigh time step of the smallest particle, or of the
-                drag relaxation time if that is shorter.
+                drag relaxation time if that is shorter. The Rayleigh time step of a polygon or a polyhedron is that
+                of the sphere it holds, whose radius is the distance from its centroid to its closest face.
             water: pore water; the particles are dry when None.
+            shapes: shapes of the rained particles, polygons in 2D and polyhedra in 3D: each particle takes one at
+                random, in a random orientation, scaled to its radius; None in the list stands for a sphere. None
+                rains spheres only.
 
         Raises:
             ValueError: if a particle has a different number of dimensions than the geometry.
+            ValueError: if a particle has a shape of the other number of dimensions.
+            ValueError: if a particle has a zero quaternion as its orientation.
+            ValueError: if the list of shapes is empty.
+            ValueError: if a shape does not suit the number of dimensions of the geometry.
             ValueError: if neither a radius range nor particles are given.
             ValueError: if the radius range is not 0 < r_min <= r_max.
             ValueError: if a particle radius is not positive.
@@ -294,11 +360,19 @@ class DEMSimulation:
             if particle.dimension != d:
                 raise ValueError(f"Particle {k} is {_DIMENSION_NAMES[particle.dimension]}, but the geometry is "
                                  f"{_DIMENSION_NAMES[d]}.")
+            if particle.shape is not None and particle.shape.dimension != d:
+                raise ValueError(f"Particle {k} has a {type(particle.shape).__name__}, but the geometry is "
+                                 f"{_DIMENSION_NAMES[d]}.")
+        if shapes is not None:
+            check_shapes(shapes, d)
+        self.__rain_shapes: Optional[Tuple[Optional[Shape], ...]] = None if shapes is None else tuple(shapes)
         self.pos: npt.NDArray[np.float64] = np.array([p.position for p in initial], dtype=np.float64).reshape(-1, d)
         self.vel: npt.NDArray[np.float64] = np.array([p.velocity for p in initial], dtype=np.float64).reshape(-1, d)
         self.radius: npt.NDArray[np.float64] = np.array([p.radius for p in initial], dtype=np.float64)
         if np.any(self.radius <= 0.0):
             raise ValueError("Particle radii must be positive.")
+        self.orientation = self.__initial_orientations(initial)
+        self.__table = PolytopeTable.build(d, [p.shape for p in initial], self.radius)
         if radius_range is None:
             if not initial:
                 raise ValueError("radius_range is required when no initial particles are given.")
@@ -315,14 +389,21 @@ class DEMSimulation:
         self.force: npt.NDArray[np.float64] = np.zeros((self.n, d))
         self.torque: npt.NDArray[np.float64] = np.zeros(rotation_shape(self.n, d))
         self.__update_mass_properties()
+        self.__pose: Optional[PolytopePose] = None
+        self.__pose_index: npt.NDArray[np.int64] = np.zeros(0, dtype=np.int64)
 
         r_min = min([self.radius_range[0]] + ([float(self.radius.min())] if self.n else []))
         r_max = max([self.radius_range[1]] + ([float(self.radius.max())] if self.n else []))
+        rain = self.__rain_shapes or (None, )
+        # the stiffest contact of a polytope is that of its flattest face, closest to its centroid
+        thinnest = [self.radius_range[0] * min(1.0 if s is None else s.inradius for s in rain)]
+        thinnest += [float(self.__table.inradius.min())] if self.n else []
         if dt is not None and dt <= 0.0:
             raise ValueError(f"dt must be positive, got {dt}.")
         self.__r_min, self.__r_max = r_min, r_max
+        self.__rain_reach = self.radius_range[1] * bounding_ratio(rain)
         self.__user_dt = dt is not None
-        self.dt = dt if dt is not None else rayleigh_time_step(material, r_min, self.settings.time_step_safety)
+        self.dt = dt if dt is not None else rayleigh_time_step(material, min(thinnest), self.settings.time_step_safety)
         self.water: Optional[Water] = None
         self.__pore_water: Optional[PoreWater] = None
         self.fluid_force: npt.NDArray[np.float64] = np.zeros((self.n, d))
@@ -349,6 +430,21 @@ class DEMSimulation:
     def n(self) -> int:
         """Number of particles in the simulation."""
         return int(self.radius.size)
+
+    @property
+    def bounding_radius(self) -> npt.NDArray[np.float64]:
+        """Radius of the sphere about the centre of each particle that holds it: its radius for a sphere [m]."""
+        return self.__table.reach
+
+    @property
+    def polytope(self) -> npt.NDArray[np.bool_]:
+        """Whether each particle is a polygon or a polyhedron rather than a sphere, shape (n,)."""
+        return self.__table.polytope
+
+    @property
+    def shapes(self) -> PolytopeTable:
+        """Shapes of the particles in their body frames, scaled to their radii."""
+        return self.__table
 
     @property
     def face_forces(self) -> npt.NDArray[np.float64]:
@@ -389,29 +485,107 @@ class DEMSimulation:
         self.__solid_friction = friction
         self.__platen_of_slot = platen_of_slot
         self.__platen_slots = np.flatnonzero(platen_of_slot >= 0)
+        self.__regions = self.__facet_regions()
         self.__wall_spring: npt.NDArray[np.float64] = np.zeros((self.n, len(solid), self.dimension))
         self.__wall_rolling: npt.NDArray[np.float64] = np.zeros((self.n, ) + rotation_shape(len(solid), self.dimension))
 
+    def __initial_orientations(self, particles: Sequence[AnyParticle]) -> npt.NDArray[np.float64]:
+        """Orientations of the initial particles, with the quaternions normalised.
+
+        Args:
+            particles: the initial particles.
+
+        Returns:
+            The orientations, shape (n,) in 2D or (n, 4) in 3D.
+
+        Raises:
+            ValueError: if a particle has a zero quaternion as its orientation.
+        """
+        if self.dimension == 2:
+            return np.array([p.orientation[0] for p in particles], dtype=np.float64)
+        quaternions = np.array([p.orientation for p in particles], dtype=np.float64).reshape(-1, 4)
+        lengths = np.linalg.norm(quaternions, axis=1)
+        if np.any(lengths <= 0.0):
+            raise ValueError(f"Particle {int(np.argmin(lengths))} has a zero quaternion as its orientation.")
+        return np.asarray(quaternions / lengths[:, None])
+
+    def __facet_regions(self) -> FacetRegions:
+        """Split the solid behind the solid facets into the regions that polytopes press on.
+
+        Returns:
+            The regions, at the position the facets have in the geometry.
+        """
+        body_of_facet = [OPEN_BODY] * self.geometry.n_facets
+        for index, platen in zip(self.__solid_index, self.__platen_of_slot):
+            body_of_facet[int(index)] = int(platen)
+        return facet_regions(self.geometry, [int(index) for index in self.__solid_index], body_of_facet)
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        """Restore a pickled simulation, also one pickled before particles could have shapes, e.g. a checkpoint.
+
+        Args:
+            state: attributes of the pickled simulation.
+        """
+        self.__dict__.update(state)
+        if "_DEMSimulation__table" in state:
+            return
+        # a simulation of spheres from before shapes existed carries on as one of spheres of today
+        d = self.dimension
+        self.__table = PolytopeTable.build(d, [None] * self.n, self.radius)
+        self.orientation = identity_orientations(self.n, d)
+        self.__rain_shapes = None
+        self.__rain_reach = self.radius_range[1]
+        self.__pose = None
+        self.__pose_index = np.zeros(0, dtype=np.int64)
+        self.__regions = self.__facet_regions()
+        self.__update_mass_properties()
+
     def __update_mass_properties(self) -> None:
         """Refresh mass and rotational inertia after the particle set has changed."""
-        # particles are spheres in a plane, see the manual for why not discs
+        # every particle has the mass of the sphere of its radius; in a plane too, see the manual for why not discs
         self.mass = self.material.density * (4.0 / 3.0) * math.pi * self.radius**3
-        self.inertia = 0.4 * self.mass * self.radius**2
+        factor = self.__table.inertia_factor
+        if self.dimension == 2:
+            self.inertia = factor * self.mass * self.radius**2
+        else:
+            self.inertia = factor * self.mass[:, None] * self.radius[:, None]**2
         self.inv_mass = 1.0 / self.mass
         self.inv_inertia = 1.0 / self.inertia
+        self.__solids = np.flatnonzero(self.__table.polytope) if self.dimension == 3 else np.zeros(0, dtype=np.int64)
 
-    def __append_particles(self, positions: npt.NDArray[np.float64], radii: npt.NDArray[np.float64],
-                           velocities: npt.NDArray[np.float64]) -> None:
+    def __sphere_inertia(self, particles: npt.NDArray[np.int64]) -> npt.NDArray[np.float64]:
+        """Moment of inertia of spheres, the same about every axis.
+
+        Args:
+            particles: indices of spheres.
+
+        Returns:
+            Their moments of inertia [kg m^2].
+        """
+        return self.inertia[particles] if self.dimension == 2 else self.inertia[particles, 0]
+
+    def __append_particles(self,
+                           positions: npt.NDArray[np.float64],
+                           radii: npt.NDArray[np.float64],
+                           velocities: npt.NDArray[np.float64],
+                           shapes: Optional[Sequence[Optional[Shape]]] = None,
+                           orientations: Optional[npt.NDArray[np.float64]] = None) -> None:
         """Add particles at the end of the state arrays, so existing indices stay valid.
 
         Args:
             positions: centres of the new particles, shape (m, d) [m].
             radii: radii of the new particles [m].
             velocities: velocities of the new particles, shape (m, d) [m/s].
+            shapes: shapes of the new particles, None for a sphere; all spheres if None.
+            orientations: orientations of the new particles; the identity if None.
         """
         m = radii.size
         if m == 0:
             return
+        new_shapes: Sequence[Optional[Shape]] = shapes if shapes is not None else [None] * m
+        new_orientations = orientations if orientations is not None else identity_orientations(m, self.dimension)
+        self.__table = self.__table.concatenate(PolytopeTable.build(self.dimension, new_shapes, radii))
+        self.orientation = np.concatenate((self.orientation, new_orientations))
         self.pos = np.vstack((self.pos, positions))
         self.vel = np.vstack((self.vel, velocities))
         self.omega = np.concatenate((self.omega, np.zeros(rotation_shape(m, self.dimension))))
@@ -430,6 +604,8 @@ class DEMSimulation:
         Args:
             keep: True for every particle that stays in the simulation.
         """
+        self.__table = self.__table.take(keep)
+        self.orientation = self.orientation[keep]
         self.pos = self.pos[keep]
         self.vel = self.vel[keep]
         self.omega = self.omega[keep]
@@ -531,6 +707,7 @@ class DEMSimulation:
         for platen in self.platens:
             platen.reaction = 0.0
         if self.n:
+            self.__place_polytopes()
             self.__particle_contacts(increment)
             self.__boundary_contacts(increment)
         self.__forces_valid = True
@@ -542,48 +719,85 @@ class DEMSimulation:
             increment: time over which the sliding and rolling velocities are accumulated into the springs [s].
         """
         neighbours = self.__neighbours
-        neighbours.update(self.pos, self.radius)
-        touching, batch = self.__pair_contacts(increment)
+        neighbours.update(self.pos, self.bounding_radius)
+        touching, batches = self.__pair_contacts(increment)
         # a contact that opened loses its history, so a later re-closure starts from zero
         neighbours.spring[~touching] = 0.0
         neighbours.rolling[~touching] = 0.0
-        if batch is None:
-            return
-        neighbours.spring[touching] = batch.forces.tangential_spring
-
         n = self.n
-        i, j = batch.first, batch.second
-        force = batch.forces.force
-        self.force += scatter_add(i, force, n) - scatter_add(j, force, n)
-        # both bodies receive a torque of the same sign, like two meshing gears
-        lever = cross(batch.normal, batch.forces.tangential_force)
-        self.torque -= scatter_add(i, scale(self.radius[i], lever), n) + scatter_add(j, scale(self.radius[j], lever), n)
-        if batch.rolling is not None:
-            neighbours.rolling[touching] = batch.rolling.rolling_spring
-            self.torque += scatter_add(i, batch.rolling.moment, n) - scatter_add(j, batch.rolling.moment, n)
+        for batch in batches:
+            neighbours.spring[batch.slot] = batch.forces.tangential_spring
+            i, j = batch.first, batch.second
+            force = batch.forces.force
+            self.force += scatter_add(i, force, n) - scatter_add(j, force, n)
+            if batch.levers is None:
+                # both bodies receive a torque of the same sign, like two meshing gears
+                lever = cross(batch.normal, batch.forces.tangential_force)
+                self.torque -= scatter_add(i, scale(self.radius[i], lever), n) + scatter_add(
+                    j, scale(self.radius[j], lever), n)
+            else:
+                lever_i, lever_j = batch.levers
+                assert lever_j is not None
+                self.torque += scatter_add(i, cross(lever_i, force), n) - scatter_add(j, cross(lever_j, force), n)
+            if batch.rolling is not None:
+                neighbours.rolling[batch.slot] = batch.rolling.rolling_spring
+                self.torque += scatter_add(i, batch.rolling.moment, n) - scatter_add(j, batch.rolling.moment, n)
 
-    def __pair_contacts(self, increment: float) -> Tuple[npt.NDArray[np.bool_], Optional[_ContactBatch]]:
+    def __pair_contacts(self, increment: float) -> Tuple[npt.NDArray[np.bool_], List[_ContactBatch]]:
         """Find the candidate pairs of the neighbour list that touch, and evaluate their contact law.
 
-        Nothing is stored: the springs of the contacts are read, and their updated values returned.
+        Nothing is stored: the springs of the contacts are read, and their updated values returned. The pairs of two
+        spheres, of a sphere and a polytope and of two polytopes are evaluated apart, each in a batch of its own.
 
         Args:
             increment: time over which the sliding and rolling velocities are accumulated into the springs [s].
 
         Returns:
-            Which candidate pairs touch, and their contacts, or None if no pair touches.
+            Which candidate pairs touch, and the batches of their contacts.
         """
         neighbours = self.__neighbours
-        first, second = neighbours.first, neighbours.second
-        if first.size == 0:
-            return np.zeros(0, dtype=bool), None
+        touching = np.zeros(neighbours.first.size, dtype=bool)
+        batches: List[_ContactBatch] = []
+        if neighbours.first.size == 0:
+            return touching, batches
+        polytope = self.polytope
+        if not np.any(polytope):
+            kinds = [np.arange(neighbours.first.size)]
+            evaluators = [self.__sphere_pairs]
+        else:
+            # 0 for two spheres, 1 for a sphere and a polytope, 2 for two polytopes
+            kind = polytope[neighbours.first].astype(np.int64) + polytope[neighbours.second]
+            kinds = [np.flatnonzero(kind == k) for k in range(3)]
+            evaluators = [self.__sphere_pairs, self.__mixed_pairs, self.__polytope_pairs]
+        for slots, evaluate in zip(kinds, evaluators):
+            if slots.size == 0:
+                continue
+            batch = evaluate(slots, increment)
+            if batch is not None:
+                assert batch.slot is not None
+                touching[batch.slot] = True
+                batches.append(batch)
+        return touching, batches
+
+    def __sphere_pairs(self, slots: npt.NDArray[np.int64], increment: float) -> Optional[_ContactBatch]:
+        """Evaluate the candidate pairs of two spheres.
+
+        Args:
+            slots: positions of the pairs in the neighbour list.
+            increment: time over which the sliding and rolling velocities are accumulated into the springs [s].
+
+        Returns:
+            The contacts of the pairs that touch, or None if none does.
+        """
+        neighbours = self.__neighbours
+        first, second = neighbours.first[slots], neighbours.second[slots]
         delta = self.pos[first] - self.pos[second]
         dist_sq = np.einsum("ij,ij->i", delta, delta)
         reach = self.radius[first] + self.radius[second]
         touching = dist_sq < reach * reach
         contacts = np.flatnonzero(touching)
         if contacts.size == 0:
-            return touching, None
+            return None
 
         i = first[contacts]
         j = second[contacts]
@@ -600,16 +814,188 @@ class DEMSimulation:
         mass_i, mass_j = self.mass[i], self.mass[j]
         effective_radius = radius_i * radius_j / (radius_i + radius_j)
         overlap = reach[contacts] - dist
-        forces = self.model.evaluate(normal, overlap, relative_velocity, neighbours.spring[contacts], increment,
+        forces = self.model.evaluate(normal, overlap, relative_velocity, neighbours.spring[slots[contacts]], increment,
                                      effective_radius, mass_i * mass_j / (mass_i + mass_j))
         rolling = None
         if self.model.rolling_friction > 0.0:
             # a particle rolls about its contact point, so its inertia there is I + m R^2
-            inertia_i = self.inertia[i] + mass_i * radius_i**2
-            inertia_j = self.inertia[j] + mass_j * radius_j**2
-            rolling = self.model.rolling(forces, self.omega[i] - self.omega[j], neighbours.rolling[contacts], increment,
-                                         effective_radius, inertia_i * inertia_j / (inertia_i + inertia_j))
-        return touching, _ContactBatch(i, j, normal, overlap, forces, rolling)
+            inertia_i = self.__sphere_inertia(i) + mass_i * radius_i**2
+            inertia_j = self.__sphere_inertia(j) + mass_j * radius_j**2
+            rolling = self.model.rolling(forces, self.omega[i] - self.omega[j], neighbours.rolling[slots[contacts]],
+                                         increment, effective_radius, inertia_i * inertia_j / (inertia_i + inertia_j))
+        # the middle of the overlap lies inside particle i, R_i - delta / 2 from its centre against the normal
+        point = self.pos[i] - scale(radius_i - 0.5 * overlap, normal)
+        return _ContactBatch(i, j, normal, overlap, forces, rolling, point, slot=slots[contacts])
+
+    def __mixed_pairs(self, slots: npt.NDArray[np.int64], increment: float) -> Optional[_ContactBatch]:
+        """Evaluate the candidate pairs of a sphere and a polytope.
+
+        The sphere presses on the polytope where the polytope comes closest to its centre, as on a wall: the Hertz
+        law applies with the radius of the sphere as R*, and the contact force acts on the polytope in the middle of
+        the overlap.
+
+        Args:
+            slots: positions of the pairs in the neighbour list.
+            increment: time over which the sliding and rolling velocities are accumulated into the springs [s].
+
+        Returns:
+            The contacts of the pairs that touch, or None if none does.
+        """
+        neighbours = self.__neighbours
+        first, second = neighbours.first[slots], neighbours.second[slots]
+        sphere_first = ~self.polytope[first]
+        sphere = np.where(sphere_first, first, second)
+        body = np.where(sphere_first, second, first)
+        distance, away = self.__distance_to_polytopes(self.pos[sphere], body)
+        overlap = self.radius[sphere] - distance
+        contacts = np.flatnonzero(overlap > 0.0)
+        if contacts.size == 0:
+            return None
+
+        slots, overlap, away = slots[contacts], overlap[contacts], away[contacts]
+        sphere, body, sphere_first = sphere[contacts], body[contacts], sphere_first[contacts]
+        i, j = first[contacts], second[contacts]
+        radius = self.radius[sphere]
+        point = self.pos[sphere] - scale(radius - 0.5 * overlap, away)
+        sphere_lever = -scale(radius, away)
+        body_lever = point - self.pos[body]
+        lever_i = np.where(sphere_first[:, None], sphere_lever, body_lever)
+        lever_j = np.where(sphere_first[:, None], body_lever, sphere_lever)
+        normal = np.where(sphere_first[:, None], away, -away)
+        relative_velocity = (self.vel[i] + spin_cross(self.omega[i], lever_i) - self.vel[j] -
+                             spin_cross(self.omega[j], lever_j))
+        mass_i, mass_j = self.mass[i], self.mass[j]
+        # a flat face of the polytope leaves the curvature of the sphere as that of the contact
+        forces = self.model.evaluate(normal, overlap, relative_velocity, neighbours.spring[slots], increment, radius,
+                                     mass_i * mass_j / (mass_i + mass_j))
+        return _ContactBatch(i, j, normal, overlap, forces, None, point, (lever_i, lever_j), slots)
+
+    def __polytope_pairs(self, slots: npt.NDArray[np.int64], increment: float) -> Optional[_ContactBatch]:
+        """Evaluate the candidate pairs of two polytopes, from the region where they overlap.
+
+        Args:
+            slots: positions of the pairs in the neighbour list.
+            increment: time over which the sliding and rolling velocities are accumulated into the springs [s].
+
+        Returns:
+            The contacts of the pairs that touch, or None if none does.
+        """
+        neighbours = self.__neighbours
+        first, second = neighbours.first[slots], neighbours.second[slots]
+        # the neighbour list holds pairs within the skin; only those whose bounding spheres overlap can touch
+        delta = self.pos[first] - self.pos[second]
+        reach = self.bounding_radius[first] + self.bounding_radius[second]
+        near = np.einsum("ij,ij->i", delta, delta) < reach * reach
+        slots, first, second = slots[near], first[near], second[near]
+        if slots.size == 0:
+            return None
+        overlap = self.__polytope_overlap(first, second)
+        size = norm(overlap.surface)
+        contacts = np.flatnonzero((overlap.measure > 0.0) & (size > 0.0))
+        if contacts.size == 0:
+            return None
+
+        slots, i, j, size = slots[contacts], first[contacts], second[contacts], size[contacts]
+        point = overlap.centroid[contacts]
+        normal = overlap.surface[contacts] / size[:, None]
+        depth = overlap.measure[contacts] / size
+        lever_i, lever_j = point - self.pos[i], point - self.pos[j]
+        relative_velocity = (self.vel[i] + spin_cross(self.omega[i], lever_i) - self.vel[j] -
+                             spin_cross(self.omega[j], lever_j))
+        mass_i, mass_j = self.mass[i], self.mass[j]
+        radius = overlap_contact_radius(size, self.dimension)
+        forces = self.model.evaluate_overlap(normal, depth, radius, relative_velocity, neighbours.spring[slots],
+                                             increment, mass_i * mass_j / (mass_i + mass_j))
+        twisting = None
+        if self.dimension == 3:
+            inertia_i, inertia_j = self.__inertia_about(i, normal), self.__inertia_about(j, normal)
+            twisting = self.model.twisting(forces, self.omega[i] - self.omega[j], neighbours.rolling[slots], increment,
+                                           radius, inertia_i * inertia_j / (inertia_i + inertia_j))
+        return _ContactBatch(i, j, normal, depth, forces, twisting, point, (lever_i, lever_j), slots)
+
+    def __inertia_about(self, particles: npt.NDArray[np.int64],
+                        axes: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+        """Moment of inertia of 3D polytope particles about axes through their centres.
+
+        Args:
+            particles: indices of polyhedral particles.
+            axes: unit axis of each particle in space, shape (k, 3).
+
+        Returns:
+            The moments of inertia, n . R diag(I) R^T n [kg m^2].
+        """
+        pose = self.__pose
+        assert pose is not None
+        body = np.einsum("kji,kj->ki", pose.rotation[self.__pose_index[particles]], axes)
+        return np.asarray(np.einsum("ki,ki->k", self.inertia[particles], body * body))
+
+    def __place_polytopes(self) -> None:
+        """Move the shapes of the polytope particles to their current position and orientation."""
+        rows = np.flatnonzero(self.polytope)
+        self.__pose_index = np.full(self.n, -1, dtype=np.int64)
+        self.__pose_index[rows] = np.arange(rows.size)
+        self.__pose = place(self.__table, rows, self.pos, self.orientation) if rows.size else None
+
+    def __placed(
+        self, particles: npt.NDArray[np.int64]
+    ) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Return the vertices, face normals and face offsets of polytope particles at their current pose.
+
+        Args:
+            particles: indices of polytope particles.
+
+        Returns:
+            Their vertices, shape (k, v, d) [m], face normals, shape (k, f, d), and face offsets, shape (k, f) [m].
+        """
+        pose = self.__pose
+        assert pose is not None
+        index = self.__pose_index[particles]
+        return pose.vertices[index], pose.normals[index], pose.offsets[index]
+
+    def __polyhedra(self, particles: npt.NDArray[np.int64]) -> Polyhedra:
+        """Return polyhedral particles at their current pose, with their topology, for the overlap queries.
+
+        Args:
+            particles: indices of polyhedral particles.
+
+        Returns:
+            The polyhedra.
+        """
+        vertices, normals, offsets = self.__placed(particles)
+        table = self.__table
+        return Polyhedra(vertices, normals, offsets, table.edges[particles], table.edge_faces[particles],
+                         table.faces[particles])
+
+    def __polytope_overlap(self, first: npt.NDArray[np.int64], second: npt.NDArray[np.int64]) -> Overlap:
+        """Return the overlaps of pairs of polytope particles.
+
+        Args:
+            first: particle i of each pair.
+            second: particle j of each pair.
+
+        Returns:
+            The overlaps, with the contact surface pointing from j towards i.
+        """
+        if self.dimension == 2:
+            return polygon_overlap(*self.__placed(first), *self.__placed(second))
+        return polyhedron_overlap(self.__polyhedra(first), self.__polyhedra(second))
+
+    def __distance_to_polytopes(
+            self, points: npt.NDArray[np.float64],
+            particles: npt.NDArray[np.int64]) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Return the signed distance from points to polytope particles, and the direction away from them.
+
+        Args:
+            points: one point per particle, shape (k, d) [m].
+            particles: indices of polytope particles.
+
+        Returns:
+            The distances, negative inside [m], and the unit normals at the closest points of the particles,
+            pointing towards the points.
+        """
+        if self.dimension == 2:
+            return polygon_distance(points, *self.__placed(particles))
+        return polyhedron_distance(points, self.__polyhedra(particles))
 
     def __solid_state(self) -> Tuple[FacetSet, npt.NDArray[np.float64]]:
         """Return the solid facets at their current position and their velocities, shape (facets, d) [m/s]."""
@@ -670,28 +1056,34 @@ class DEMSimulation:
         """
         if self.__solid.count == 0:
             return
-        batch = self.__facet_contacts(increment)
+        batches = self.__facet_contacts(increment)
         touching = np.zeros((self.n, self.__solid.count), dtype=bool)
-        if batch is not None:
+        for batch in batches:
             touching[batch.first, batch.second] = True
         self.__wall_spring[~touching] = 0.0
         self.__wall_rolling[~touching] = 0.0
-        if batch is None:
+        if not batches:
             return
-        particle, facet = batch.first, batch.second
-        self.__wall_spring[particle, facet] = batch.forces.tangential_spring
 
         n = self.n
-        force = batch.forces.force
-        self.force += scatter_add(particle, force, n)
-        lever = cross(batch.normal, batch.forces.tangential_force)
-        self.torque -= scatter_add(particle, scale(self.radius[particle], lever), n)
-        if batch.rolling is not None:
-            self.__wall_rolling[particle, facet] = batch.rolling.rolling_spring
-            self.torque += scatter_add(particle, batch.rolling.moment, n)
+        for batch in batches:
+            particle, facet = batch.first, batch.second
+            self.__wall_spring[particle, facet] = batch.forces.tangential_spring
+            force = batch.forces.force
+            self.force += scatter_add(particle, force, n)
+            if batch.levers is None:
+                lever = cross(batch.normal, batch.forces.tangential_force)
+                self.torque -= scatter_add(particle, scale(self.radius[particle], lever), n)
+            else:
+                self.torque += scatter_add(particle, cross(batch.levers[0], force), n)
+            if batch.rolling is not None:
+                self.__wall_rolling[particle, facet] = batch.rolling.rolling_spring
+                self.torque += scatter_add(particle, batch.rolling.moment, n)
+
+        facet = np.concatenate([batch.second for batch in batches])
+        force = np.concatenate([batch.forces.force for batch in batches])
         # the particles push each facet with the opposite of the force it exerts on them
         self.edge_forces[self.__solid_index] = -scatter_add(facet, force, self.__solid_index.size)
-
         if self.platens:
             platen = self.__platen_of_slot[facet]
             on_platen = platen >= 0
@@ -703,7 +1095,7 @@ class DEMSimulation:
                 for p, reaction in zip(self.platens, reactions):
                     p.reaction = float(reaction)
 
-    def __facet_contacts(self, increment: float) -> Optional[_ContactBatch]:
+    def __facet_contacts(self, increment: float) -> List[_ContactBatch]:
         """Find the particles that touch a solid facet, and evaluate their contact law.
 
         Nothing is stored: the springs of the contacts are read, and their updated values returned.
@@ -712,14 +1104,23 @@ class DEMSimulation:
             increment: time over which the sliding and rolling velocities are accumulated into the springs [s].
 
         Returns:
-            The contacts, whose second member is the slot of the solid facet, or None if no particle touches one.
+            The batches of the contacts of the spheres and of the polytopes, whose second member is the slot of the
+            solid facet; empty if no particle touches one.
         """
         facets, velocities = self.__solid_state()
-        particle, facet, offset, dist_sq = facets.touching(self.pos, self.radius)
+        particle, facet, offset, dist_sq = facets.touching(self.pos, self.bounding_radius)
+        batches: List[_ContactBatch] = []
+        polytope = self.polytope[particle]
+        if np.any(polytope):
+            batch = self.__polytope_facet_contacts(particle[polytope], facet[polytope], velocities, increment)
+            if batch is not None:
+                batches.append(batch)
+            sphere = ~polytope
+            particle, facet, offset, dist_sq = particle[sphere], facet[sphere], offset[sphere], dist_sq[sphere]
         keep = ~self.__redundant_contacts(particle, facet, offset, facets)
         particle, facet, offset, dist_sq = particle[keep], facet[keep], offset[keep], dist_sq[keep]
         if particle.size == 0:
-            return None
+            return batches
 
         dist = np.sqrt(dist_sq)
         radius = self.radius[particle]
@@ -737,8 +1138,85 @@ class DEMSimulation:
         if self.model.rolling_friction > 0.0:
             # facets never rotate, so the relative spin is the particle's own
             rolling = self.model.rolling(forces, self.omega[particle], self.__wall_rolling[particle, facet], increment,
-                                         radius, self.inertia[particle] + self.mass[particle] * radius**2)
-        return _ContactBatch(particle, facet, normal, overlap, forces, rolling)
+                                         radius,
+                                         self.__sphere_inertia(particle) + self.mass[particle] * radius**2)
+        point = self.pos[particle] - scale(radius - 0.5 * overlap, normal)
+        # the polytopes come first, so put the spheres in front to keep their contacts in the order of before
+        return [_ContactBatch(particle, facet, normal, overlap, forces, rolling, point)] + batches
+
+    def __polytope_facet_contacts(self, particle: npt.NDArray[np.int64], facet: npt.NDArray[np.int64],
+                                  velocities: npt.NDArray[np.float64], increment: float) -> Optional[_ContactBatch]:
+        """Evaluate the contacts of polytopes with the solid facets they may touch, from their overlap with the solid.
+
+        Each particle overlaps the regions of solid behind the facets (``DEMcookies.regions``); the regions of one
+        facet add up to its contact. The contacts of a particle with coplanar facets share the contact radius of
+        their whole contact surface, as one contact would have.
+
+        Args:
+            particle: polytope of each candidate pair, sorted.
+            facet: solid facet of each candidate pair.
+            velocities: velocity of each solid facet, shape (s, d) [m/s].
+            increment: time over which the sliding velocity is accumulated into the springs [s].
+
+        Returns:
+            The contacts of the pairs that touch, or None if none does.
+        """
+        regions = self.__regions
+        shifts = np.zeros((self.__solid.count, self.dimension))
+        for slots, platen in zip(self.__platen_slot_groups, self.platens):
+            shifts[slots] = platen.shift
+        offsets = regions.moved(shifts)
+        # every region of the facet of every candidate, each counted for its candidate
+        counts = regions.start[facet + 1] - regions.start[facet]
+        owner = np.repeat(np.arange(particle.size), counts)
+        region = np.repeat(regions.start[facet], counts) + np.arange(owner.size) - np.repeat(
+            np.cumsum(counts) - counts, counts)
+        rows = particle[owner]
+        if self.dimension == 2:
+            overlap = polygon_region_overlap(*self.__placed(rows), regions.normals[region], offsets[region])
+        else:
+            overlap = polyhedron_region_overlap(self.__polyhedra(rows), regions.normals[region], offsets[region])
+        measure = np.bincount(owner, overlap.measure, particle.size)
+        first = scatter_add(owner, overlap.measure[:, None] * overlap.centroid, particle.size)
+        size = np.bincount(owner, np.einsum("ij,ij->i", overlap.surface, regions.normals[region, 0]), particle.size)
+        contacts = np.flatnonzero((measure > 0.0) & (size > 0.0))
+        if contacts.size == 0:
+            return None
+
+        particle, facet, measure, size = particle[contacts], facet[contacts], measure[contacts], size[contacts]
+        point = first[contacts] / measure[:, None]
+        normal = self.__solid_normals[facet]
+        plane = offsets[regions.start[facet], 0]
+        total = _coplanar_totals(particle, normal, plane, size, self.radius[particle])
+        lever = point - self.pos[particle]
+        relative_velocity = self.vel[particle] + spin_cross(self.omega[particle], lever) - velocities[facet]
+        radius = overlap_contact_radius(total, self.dimension)
+        friction = self.__solid_friction[facet]
+        # a wall is a body of infinite mass, so m* reduces to the particle's
+        forces = self.model.evaluate_overlap(normal, measure / size, radius, relative_velocity,
+                                             self.__wall_spring[particle, facet], increment, self.mass[particle],
+                                             size / total, friction)
+        twisting = None
+        if self.dimension == 3:
+            # facets never rotate, so the relative spin is the particle's own
+            twisting = self.model.twisting(forces, self.omega[particle], self.__wall_rolling[particle, facet],
+                                           increment, radius, self.__inertia_about(particle, normal), friction)
+        return _ContactBatch(particle, facet, normal, measure / size, forces, twisting, point, (lever, None))
+
+    def __seat_points(self) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+        """Return the points that a loaded body is seated on: the spheres, and the vertices of the polytopes.
+
+        Returns:
+            The points, shape (k, d) [m], and their radii, zero for a vertex [m].
+        """
+        sphere = ~self.polytope
+        points, radii = [self.pos[sphere]], [self.radius[sphere]]
+        rows, vertices = frame_polygons(self.__table, self.pos, self.orientation)
+        if rows.size:
+            real = np.arange(vertices.shape[1])[None, :] < self.__table.vertex_count[rows, None]
+            points.append(vertices[real])
+            radii.append(np.zeros(int(real.sum())))
+        return np.concatenate(points), np.concatenate(radii)
 
     def contacts(self) -> Tuple[ContactList, ContactList]:
         """Return the contacts of the current state, between particles and between particles and the solid facets.
@@ -751,23 +1229,24 @@ class DEMSimulation:
             The particle-particle contacts, and the particle-facet contacts, whose ``second`` is the index of the
             facet in the geometry.
         """
-        pairs: Optional[_ContactBatch] = None
-        walls: Optional[_ContactBatch] = None
+        pairs: List[_ContactBatch] = []
+        walls: List[_ContactBatch] = []
         if self.n:
             # the list is already up to date after a step; it only changes after particles were added or removed
-            self.__neighbours.update(self.pos, self.radius)
+            self.__neighbours.update(self.pos, self.bounding_radius)
+            self.__place_polytopes()
             _, pairs = self.__pair_contacts(0.0)
             if self.__solid.count:
                 walls = self.__facet_contacts(0.0)
         return self.__contact_list(pairs), self.__contact_list(walls, self.__solid_index)
 
     def __contact_list(self,
-                       batch: Optional[_ContactBatch],
+                       batches: List[_ContactBatch],
                        facet_index: Optional[npt.NDArray[np.int64]] = None) -> ContactList:
-        """Turn a batch of evaluated contacts into a contact list.
+        """Turn batches of evaluated contacts into a contact list.
 
         Args:
-            batch: the contacts, or None if there are none.
+            batches: the contacts.
             facet_index: index in the geometry of each solid facet slot, for contacts with the facets; None for
                 contacts between particles.
 
@@ -775,15 +1254,19 @@ class DEMSimulation:
             The contacts.
         """
         d = self.dimension
-        if batch is None:
+        if not batches:
             none = np.zeros(0, dtype=np.int64)
             return ContactList(none, none.copy(), np.zeros((0, d)), np.zeros((0, d)), np.zeros(0), np.zeros(0),
                                np.zeros((0, d)))
-        second = batch.second if facet_index is None else facet_index[batch.second]
-        # the middle of the overlap lies inside particle i, R_i - delta / 2 from its centre against the normal
-        point = self.pos[batch.first] - scale(self.radius[batch.first] - 0.5 * batch.overlap, batch.normal)
-        return ContactList(batch.first, second, point, batch.normal, batch.overlap, batch.forces.normal_force,
-                           batch.forces.tangential_force)
+        second = np.concatenate([batch.second for batch in batches])
+        if facet_index is not None:
+            second = facet_index[second]
+        return ContactList(np.concatenate([batch.first for batch in batches]), second,
+                           np.concatenate([batch.point for batch in batches]),
+                           np.concatenate([batch.normal for batch in batches]),
+                           np.concatenate([batch.overlap for batch in batches]),
+                           np.concatenate([batch.forces.normal_force for batch in batches]),
+                           np.concatenate([batch.forces.tangential_force for batch in batches]))
 
     # ------------------------------------------------------------------ #
     #  Time integration                                                  #
@@ -801,6 +1284,50 @@ class DEMSimulation:
         pushed = self.vel + rate[:, None] * (self.force + self.__drag_coefficient[:, None] * self.__water_velocity)
         self.vel = pushed / (1.0 + rate * self.__drag_coefficient)[:, None]
 
+    def __spin(self, half: float) -> None:
+        """Update the angular velocities over half a time step.
+
+        A polyhedron spins about an axis that need not be one of its principal axes, so its angular momentum
+        R diag(I) R^T omega, not its angular velocity, is what the torque changes.
+
+        Args:
+            half: half the time step [s].
+        """
+        if self.dimension == 2:
+            self.omega += scale(self.inv_inertia, half * self.torque)
+            return
+        solids = self.__solids
+        if solids.size:
+            rotation = rotation_matrices(self.orientation[solids])
+            momentum = apply_inertia(rotation, self.inertia[solids], self.omega[solids]) + half * self.torque[solids]
+        self.omega += self.inv_inertia * (half * self.torque)
+        if solids.size:
+            self.omega[solids] = apply_inertia(rotation, self.inv_inertia[solids], momentum)
+
+    def __turn(self, dt: float) -> None:
+        """Turn the particles over a time step.
+
+        The angular momentum of a polyhedron stays the same during the drift, while its angular velocity follows its
+        orientation: the turn uses the angular velocity of the orientation half way, which makes it accurate to
+        second order, and leaves the angular velocity that of the new orientation.
+
+        Args:
+            dt: time step [s].
+        """
+        if self.dimension == 2:
+            self.orientation = self.orientation + dt * self.omega
+            return
+        solids = self.__solids
+        turned = rotate(self.orientation, dt * self.omega)
+        if solids.size:
+            start = self.orientation[solids]
+            momentum = apply_inertia(rotation_matrices(start), self.inertia[solids], self.omega[solids])
+            middle = rotate(start, 0.5 * dt * self.omega[solids])
+            spin = apply_inertia(rotation_matrices(middle), self.inv_inertia[solids], momentum)
+            turned[solids] = rotate(start, dt * spin)
+            self.omega[solids] = apply_inertia(rotation_matrices(turned[solids]), self.inv_inertia[solids], momentum)
+        self.orientation = turned
+
     def step(self) -> None:
         """Advance the whole system by one velocity-Verlet step."""
         if not self.__forces_valid:
@@ -811,12 +1338,13 @@ class DEMSimulation:
 
         # first half kick, with the forces of the previous evaluation
         self.__kick(half)
-        self.omega += scale(self.inv_inertia, half * self.torque)
+        self.__spin(half)
         for platen in active:
             platen.velocity += half * platen.acceleration(self.load_time, self.__gravity)
 
         # drift
         self.pos += dt * self.vel
+        self.__turn(dt)
         for platen in active:
             platen.offset += dt * platen.velocity
         self.time += dt
@@ -830,7 +1358,7 @@ class DEMSimulation:
 
         # second half kick, with the new forces
         self.__kick(half)
-        self.omega += scale(self.inv_inertia, half * self.torque)
+        self.__spin(half)
         for platen in active:
             platen.velocity += half * platen.acceleration(self.load_time, self.__gravity)
         for observer in self.__observers:
@@ -874,7 +1402,8 @@ class DEMSimulation:
         """Highest point of any particle [m]."""
         if self.n == 0:
             return float(self.geometry.bounds[0][1])
-        return float(np.max(self.pos[:, 1] + self.radius))
+        points, radii = self.__seat_points()
+        return float(np.max(points[:, 1] + radii))
 
     def __record_frame(self, phase: str) -> None:
         """Store a snapshot of the current state.
@@ -885,7 +1414,11 @@ class DEMSimulation:
         speeds = norm(self.vel)
         platens = tuple(p.vertices for p in self.platens)
         level = evaluate_at(self.water.level, self.time) if self.water is not None else None
-        self.frames.append(Frame(self.time, self.pos.copy(), self.radius.copy(), speeds, platens, phase, level))
+        # the table of shapes is never changed, only replaced, so a frame can share it
+        shaped = bool(np.any(self.polytope))
+        self.frames.append(
+            Frame(self.time, self.pos.copy(), self.radius.copy(), speeds, platens, phase, level,
+                  self.orientation.copy() if shaped else None, self.__table if shaped else None))
 
     def __record_loads(self) -> None:
         """Append the current state of every platen to its load curve."""
@@ -923,7 +1456,8 @@ class DEMSimulation:
         Each wave inserts up to ``batch_size`` particles in a band near the top of the domain. A radius that cannot
         be placed is retried in the next waves, largest first, so the size distribution is not biased towards small
         particles. Once the packing reaches the band nothing can be inserted, and after ``patience`` empty waves in
-        a row the domain is considered full.
+        a row the domain is considered full. With ``shapes`` given to the simulation, each particle takes one of them
+        at random, in a random orientation, and is placed so that the sphere that holds it overlaps nothing.
 
         Args:
             settings: deposition settings; defaults to ``RainSettings()``.
@@ -935,19 +1469,27 @@ class DEMSimulation:
         rng = np.random.default_rng(rain.seed)
         r_min, r_max = self.radius_range
         top = float(self.geometry.bounds[1][1])
-        band = rain.insertion_band or (top - 2.0 * r_max, top - r_max)
-        pending: List[float] = []
+        reach = self.__rain_reach
+        band = rain.insertion_band or (top - 2.0 * reach, top - reach)
+        pending: List[Tuple[float, Optional[Shape]]] = []
         empty_waves = 0
         steps = 0
         while empty_waves < rain.patience and self.n < rain.max_particles and steps < rain.max_steps:
             room = min(rain.batch_size, rain.max_particles - self.n)
             # only top the queue up, so radii that could not be placed are retried instead of replaced
-            pending.extend(float(r) for r in rng.uniform(r_min, r_max, max(0, room - len(pending))))
-            positions, radii, unplaced = self.__place_wave(pending[:room], band, rain.attempts, rng)
+            radii = rng.uniform(r_min, r_max, max(0, room - len(pending)))
+            pending.extend(zip((float(r) for r in radii), self.__draw_shapes(rng, radii.size)))
+            positions, placed, unplaced = self.__place_wave(pending[:room], band, rain.attempts, rng)
             pending = unplaced + pending[room:]
             velocities = np.zeros_like(positions)
             velocities[:, 1] = -rain.rain_speed
-            self.__append_particles(positions, radii, velocities)
+            radii = np.array([radius for radius, _ in placed], dtype=np.float64)
+            shapes = [shape for _, shape in placed]
+            # only shaped rain turns the particles, so that a rain of spheres draws what it did without shapes
+            orientations = None
+            if self.__rain_shapes is not None:
+                orientations = random_orientations(rng, radii.size, self.dimension)
+            self.__append_particles(positions, radii, velocities, shapes, orientations)
             empty_waves = 0 if radii.size else empty_waves + 1
             for _ in range(rain.steps_between):
                 self.step()
@@ -964,59 +1506,82 @@ class DEMSimulation:
                 break
         return self.n
 
-    def __place_wave(self, radii: Sequence[float], band: Tuple[float, float], attempts: int,
-                     rng: np.random.Generator) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], List[float]]:
-        """Find non-overlapping positions in the insertion band for a wave of particles.
+    def __draw_shapes(self, rng: np.random.Generator, count: int) -> List[Optional[Shape]]:
+        """Draw the shapes of rained particles.
 
         Args:
-            radii: radii to place [m].
+            rng: random generator, which is not used when the simulation rains spheres only.
+            count: number of particles.
+
+        Returns:
+            The shape of each particle, None for a sphere.
+        """
+        shapes = self.__rain_shapes
+        if shapes is None:
+            return [None] * count
+        return [shapes[k] for k in rng.integers(len(shapes), size=count)]
+
+    def __place_wave(
+        self, items: Sequence[Tuple[float,
+                                    Optional[Shape]]], band: Tuple[float,
+                                                                   float], attempts: int, rng: np.random.Generator
+    ) -> Tuple[npt.NDArray[np.float64], List[Tuple[float, Optional[Shape]]], List[Tuple[float, Optional[Shape]]]]:
+        """Find non-overlapping positions in the insertion band for a wave of particles.
+
+        A shaped particle is placed so that the sphere that holds it, whatever its orientation, overlaps nothing.
+
+        Args:
+            items: radius [m] and shape of each particle to place, None for a sphere.
             band: lowest and highest y of the particle centres [m].
             attempts: random positions tried per particle.
             rng: random generator.
 
         Returns:
-            The centres and radii of the placed particles, and the radii that could not be placed.
+            The centres of the placed particles, their radii and shapes, and those of the particles that could not be
+            placed.
         """
         y_low, y_high = band
         low, high = self.geometry.bounds
-        r_max = self.radius_range[1]
+        largest = max([self.__rain_reach] + ([float(self.bounding_radius.max())] if self.n else []))
         # the band is horizontal: x, and z in 3D, are drawn across the whole domain
         horizontal = [0] if self.dimension == 2 else [0, 2]
         # only particles whose centre is this close to the band can overlap a new particle
-        nearby = self.pos[:, 1] > y_low - 2.0 * r_max
+        nearby = self.pos[:, 1] > y_low - 2.0 * largest
         others = self.pos[nearby]
-        other_radii = self.radius[nearby]
+        other_reach = self.bounding_radius[nearby]
         facets, _ = self.__solid_state()
         moved = facets.select(self.__platen_slots)
 
-        placed: List[Tuple[float, ...]] = []
-        unplaced: List[float] = []
-        for radius in sorted(radii, reverse=True):
-            if any(high[k] - low[k] <= 2.0 * radius for k in horizontal):
-                unplaced.append(radius)
+        centres: List[npt.NDArray[np.float64]] = []
+        placed: List[Tuple[float, Optional[Shape]]] = []
+        unplaced: List[Tuple[float, Optional[Shape]]] = []
+        for item in sorted(items, key=lambda entry: entry[0], reverse=True):
+            radius, shape = item
+            reach = radius if shape is None else radius * shape.circumradius
+            if any(high[k] - low[k] <= 2.0 * reach for k in horizontal):
+                unplaced.append(item)
                 continue
-            columns = [rng.uniform(low[0] + radius, high[0] - radius, attempts), rng.uniform(y_low, y_high, attempts)]
+            columns = [rng.uniform(low[0] + reach, high[0] - reach, attempts), rng.uniform(y_low, y_high, attempts)]
             if self.dimension == 3:
-                columns.append(rng.uniform(low[2] + radius, high[2] - radius, attempts))
+                columns.append(rng.uniform(low[2] + reach, high[2] - reach, attempts))
             candidates = np.column_stack(columns)
             fits = self.geometry.contains(candidates)
-            fits &= self.geometry.distance_to_facets(candidates).min(axis=1) >= radius
+            fits &= self.geometry.distance_to_facets(candidates).min(axis=1) >= reach
             if moved.count:
-                fits &= moved.distances(candidates).min(axis=1) >= radius
+                fits &= moved.distances(candidates).min(axis=1) >= reach
             if others.shape[0]:
                 delta = candidates[:, None, :] - others[None, :, :]
-                fits &= ~np.any(np.einsum("ijk,ijk->ij", delta, delta) < (other_radii + radius)**2, axis=1)
+                fits &= ~np.any(np.einsum("ijk,ijk->ij", delta, delta) < (other_reach + reach)**2, axis=1)
             found = np.flatnonzero(fits)
             if found.size == 0:
-                unplaced.append(radius)
+                unplaced.append(item)
                 continue
             centre = candidates[found[0]]
-            placed.append((*(float(c) for c in centre), radius))
+            centres.append(centre)
+            placed.append(item)
             others = np.vstack((others, centre[None, :]))
-            other_radii = np.append(other_radii, radius)
-
-        table = np.array(placed, dtype=np.float64).reshape(-1, self.dimension + 1)
-        return table[:, :-1].copy(), table[:, -1].copy(), unplaced
+            other_reach = np.append(other_reach, reach)
+        return np.array(centres, dtype=np.float64).reshape(-1, self.dimension), placed, unplaced
 
     def rest(self, duration: float, record_every: int = 60, phase: str = "settling") -> None:
         """Advance the simulation for a given time without changing the load, e.g. to let the packing relax.
@@ -1054,7 +1619,7 @@ class DEMSimulation:
             raise ValueError("Loading has already started; a released platen cannot be seated again.")
         for platen in self.platens:
             if platen.spec.seat_on_bed:
-                platen.seat(self.pos, self.radius)
+                platen.seat(*self.__seat_points())
         self.__forces_valid = False
 
     def compress(self, duration: float, record_every: int = 40) -> None:
@@ -1079,7 +1644,7 @@ class DEMSimulation:
         if not any(p.active for p in self.platens):
             for platen in self.platens:
                 if platen.spec.seat_on_bed and self.n:
-                    platen.seat(self.pos, self.radius)
+                    platen.seat(*self.__seat_points())
                 platen.activate()
             self.__forces_valid = False
             self.compute_forces()
@@ -1108,6 +1673,38 @@ class DEMSimulation:
 
 
 _DIMENSION_NAMES = {2: "two-dimensional", 3: "three-dimensional"}
+
+
+def _coplanar_totals(particle: npt.NDArray[np.int64], normal: npt.NDArray[np.float64], plane: npt.NDArray[np.float64],
+                     size: npt.NDArray[np.float64], radius: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """Size of the whole contact surface that each contact of a particle with a facet is part of.
+
+    The contacts of one particle with facets in the same plane, e.g. a floor made of several faces, are parts of one
+    contact surface; every other contact is a surface of its own.
+
+    Args:
+        particle: particle of each contact, sorted.
+        normal: unit normal of the facet of each contact, shape (k, d).
+        plane: offset of the plane of that facet [m].
+        size: size of the contact surface of each contact, an area in 3D and a length in 2D [m^2 or m].
+        radius: radius of the particle of each contact, which scales the tolerance on the offsets [m].
+
+    Returns:
+        The total size of the coplanar contact surfaces of each contact, its own included.
+    """
+    total = size.copy()
+    # contacts are sorted by particle, so the contacts of one particle are adjacent
+    for lag in range(1, particle.size):
+        index = np.arange(particle.size - lag)
+        same = particle[index] == particle[index + lag]
+        if not np.any(same):
+            break
+        a, b = index[same], index[same] + lag
+        coplanar = ((norm(normal[a] - normal[b]) <= COPLANAR_TOLERANCE) &
+                    (np.abs(plane[a] - plane[b]) <= COPLANAR_TOLERANCE * radius[a]))
+        total[a[coplanar]] += size[b[coplanar]]
+        total[b[coplanar]] += size[a[coplanar]]
+    return total
 
 
 def _check_record_every(record_every: int) -> None:

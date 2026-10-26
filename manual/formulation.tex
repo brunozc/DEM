@@ -1198,3 +1198,157 @@ The checks of the planar model hold in space.
 A sphere on a floor tilted about the oblique horizontal axis $\tfrac{1}{\sqrt{2}}(1,0,1)$, with the same gradients as in Section~\ref{sec:rolling}, rolls straight down the slope, without slipping and without twisting.
 It accelerates at \qtylist{3.0322;1.7688;0.5054}{\metre\per\second\squared} for $\mu_{r}=0$, $0.2$ and $0.4$, as~\eqref{eq:incline} requires, and stays put on the gentler gradient of $0.32$ with $\mu_{r}=0.4$.
 A simulation whose particles move in a plane $z=\text{const}$ of a domain extruded from a polygon reproduces the planar simulation of that polygon to rounding error, rolling resistance and loaded bodies included.
+
+\section{Polygonal and polyhedral particles}
+\label{sec:polytopes}
+
+Discs and spheres roll past each other far too easily, and rolling resistance (Section~\ref{sec:rolling}) only mimics the interlocking of angular grains.
+The particles may therefore also be convex polygons in the plane and convex polyhedra in space, polytopes for short, alone or mixed with spheres.
+Polyhedral blocks have a long history in the distinct element method~\cite{cundall1988}.
+Here a contact between polytopes follows from the region where the two bodies overlap, as in the volume-based models~\cite{feng2012,nassauer2013,elias2014}, while the constitutive law stays that of Hertz and Mindlin.
+
+\subsection{Shape, size and mass}
+
+A shape is the convex hull of a set of points, stored in its body frame: the centroid lies at the origin and, in space, the principal axes of inertia lie along the coordinate axes.
+The radius $R_{i}$ of the particle sets its size: it is the \emph{equivalent radius} of the shape, that of the sphere of equal volume $V_{i}$ in space and that of the disc of equal area $A_{i}$ in the plane,
+\begin{equation}
+  R_{i} = \Bigl(\frac{3V_{i}}{4\pi}\Bigr)^{1/3}\quad\text{(3D)},
+  \qquad
+  R_{i} = \sqrt{\frac{A_{i}}{\pi}}\quad\text{(2D)}.
+  \label{eq:equivalent-radius}
+\end{equation}
+Every particle thus has the mass $m_{i}=\tfrac{4}{3}\pi\rho R_{i}^{3}$ of~\eqref{eq:massprops}: in space that of the polyhedron, and in the plane that of the grain whose mid-section the polygon is, as a disc stands for a sphere in Section~\ref{sec:massprops}.
+Replacing spheres by polytopes of the same radii therefore keeps the grading and the mass of a packing, and with them the buoyancy, the drag and the porosity of Section~\ref{sec:water}, which follow from $R_{i}$.
+
+The moment of inertia of a polygon follows the same reasoning as~\eqref{eq:massprops}: it is $4/5$ of that of a prism with the section and the mass of the particle,
+\begin{equation}
+  I_{i} = \frac{4}{5}\,\frac{m_{i}}{A_{i}}\int_{A_{i}} r^{2}\,\mathrm{d}A ,
+  \label{eq:polygon-inertia}
+\end{equation}
+with $r$ the distance from the centroid, which gives $\tfrac{2}{5}m_{i}R_{i}^{2}$ for a disc, the moment of inertia of a sphere.
+A polyhedron has the principal moments of inertia $I_{i,1}$, $I_{i,2}$ and $I_{i,3}$ of its volume, the eigenvalues of $\rho\int_{V_{i}}(r^{2}\mathbf{1}-\mathbf{r}\mathbf{r}^{\mathsf{T}})\,\mathrm{d}V$.
+
+\subsection{Orientation and rotation}
+
+A polytope also has an orientation: an angle $\theta_{i}$ about $\mathbf{e}_{z}$ in the plane, and a unit quaternion $q_{i}$ in space, whose rotation matrix $\mathbf{R}_{i}$ turns the body frame into space.
+A point at $\mathbf{r}$ in the body frame lies at $\mathbf{x}_{i}+\mathbf{R}_{i}\mathbf{r}$.
+In the plane $\dot{\theta}_{i}=\omega_{i}$, and the Euler equation~\eqref{eq:euler} holds as it stands.
+In space the inertia tensor $\mathbf{I}_{i}=\mathbf{R}_{i}\operatorname{diag}(I_{i,1},I_{i,2},I_{i,3})\,\mathbf{R}_{i}^{\mathsf{T}}$ turns with the body, so the torque changes the angular momentum rather than the angular velocity:
+\begin{equation}
+  \frac{\mathrm{d}}{\mathrm{d}t}\bigl(\mathbf{I}_{i}\boldsymbol{\omega}_{i}\bigr) = \mathbf{T}_{i},
+  \qquad
+  \dot{q}_{i} = \tfrac{1}{2}\,(0,\boldsymbol{\omega}_{i})\otimes q_{i}.
+  \label{eq:euler-polyhedron}
+\end{equation}
+The first equation contains the gyroscopic term $\boldsymbol{\omega}_{i}\times\mathbf{I}_{i}\boldsymbol{\omega}_{i}$, which vanishes for a sphere.
+
+\subsection{Overlap region}
+
+Two convex bodies $\mathcal{P}_{i}$ and $\mathcal{P}_{j}$ overlap, if at all, in one convex region $\Omega=\mathcal{P}_{i}\cap\mathcal{P}_{j}$.
+A pair therefore has at most one contact, and its tangential spring is kept per pair, as for spheres (Section~\ref{sec:tangential}).
+Three properties of $\Omega$ define the contact: its volume $V$ (its area in the plane), its centroid $\mathbf{x}_{c}$ and the contact surface
+\begin{equation}
+  \mathbf{S} = \int_{\partial\mathcal{P}_{j}\cap\mathcal{P}_{i}} \mathbf{n}_{j}\,\mathrm{d}A ,
+  \label{eq:contact-surface}
+\end{equation}
+the area vector of the part of the surface of $j$ inside $i$, with $\mathbf{n}_{j}$ the outward normal of $j$.
+Since the boundary of $\Omega$ is closed, $\mathbf{S}$ is also minus the area vector of the part of the surface of $i$ inside $j$, and depends only on the curve where the two surfaces meet.
+Moving $\mathcal{P}_{i}$ by $\mathrm{d}\mathbf{x}$ changes the volume of the overlap by $-\mathbf{S}\cdot\mathrm{d}\mathbf{x}$, so $\mathbf{S}$ points from $j$ towards $i$, along the direction in which the overlap shrinks fastest, and the contact normal is $\mathbf{n}=\mathbf{S}/S$, with $S=\lVert\mathbf{S}\rVert$.
+In the plane the surface of $j$ inside $i$ is a broken line between the two points where the outlines cross, and $\mathbf{S}$ is the chord between them turned by a right angle, of length $L=S$.
+
+\subsection{Contact law}
+
+Polytopes have no curvature from which the Hertz contact radius~\eqref{eq:contact-radius} could follow, so it is measured on the overlap instead.
+To leading order in $\delta_{n}/R^{*}$, the overlap of two spheres is a lens of volume $\pi R^{*}\delta_{n}^{2}$ whose rim is a circle of radius $\sqrt{2R^{*}\delta_{n}}$, $\sqrt{2}$ times the contact radius~\eqref{eq:contact-radius}.
+Its section through the centres is a lens of area $\tfrac{4}{3}\sqrt{2R^{*}\delta_{n}}\,\delta_{n}$ across a chord of twice that radius.
+The contact radius $a$ and the mean depth $\bar{\delta}$ of a polytope contact keep these ratios:
+\begin{equation}
+  a = \sqrt{\frac{S}{2\pi}},\quad \bar{\delta} = \frac{V}{S}\quad\text{(3D)},
+  \qquad
+  a = \frac{L}{2\sqrt{2}},\quad \bar{\delta} = \frac{A}{L}\quad\text{(2D)},
+  \label{eq:polytope-radius}
+\end{equation}
+and the elastic normal force is
+\begin{equation}
+  \boxed{\;
+  F_{n}^{\mathrm{e}} = \kappa\,S_{n}\,\bar{\delta},
+  \qquad S_{n}=2E^{*}a,
+  \qquad \kappa = \tfrac{4}{3}\ \text{(3D)},\quad \kappa=1\ \text{(2D)}.\;}
+  \label{eq:polytope-force}
+\end{equation}
+For two spheres $\bar{\delta}=\delta_{n}/2$ in space and $\tfrac{2}{3}\delta_{n}$ in the plane, and~\eqref{eq:polytope-force} is the Hertz force~\eqref{eq:hertz}.
+For other shapes it stays close to the classical solutions~\cite{johnson1985}.
+A flat face of area $S$ pressed in by $\delta$ carries $\tfrac{8}{3}E^{*}\sqrt{S/(2\pi)}\,\delta$, within \num{6}\% of the force $2E^{*}\sqrt{S/\pi}\,\delta$ of a rigid flat punch.
+A cone of semi-angle $\alpha$ pressed in by $\delta$ carries $\tfrac{8}{9\sqrt{2}}E^{*}\tan\alpha\,\delta^{2}$, within \num{2}\% of the force $\tfrac{2}{\pi}E^{*}\tan\alpha\,\delta^{2}$ of Sneddon's solution.
+Corner, edge and face contacts therefore all respond with a stiffness of the right order, from the soft $\delta^{2}$ of a corner to the linear response of a face.
+
+The tangent stiffness $S_{n}$ of~\eqref{eq:polytope-force} enters the damping~\eqref{eq:cn} as for spheres, and the Mindlin stiffness $S_{t}=8G^{*}a$ of~\eqref{eq:St}, the tangential history and the Coulomb limit of Section~\ref{sec:tangential} carry over unchanged, with the effective mass~\eqref{eq:effective}.
+The overlap reported for a polytope contact is its mean depth $\bar{\delta}$.
+
+\subsection{Force, torque and twisting}
+
+The contact force acts on both bodies at the centroid $\mathbf{x}_{c}$ of the overlap.
+With the lever arms $\mathbf{r}_{i}=\mathbf{x}_{c}-\mathbf{x}_{i}$ and $\mathbf{r}_{j}=\mathbf{x}_{c}-\mathbf{x}_{j}$, the relative velocity of the contact point and the torques are
+\begin{equation}
+  \mathbf{v}_{ij} = \mathbf{v}_{i}+\boldsymbol{\omega}_{i}\times\mathbf{r}_{i}-\mathbf{v}_{j}-\boldsymbol{\omega}_{j}\times\mathbf{r}_{j},
+  \qquad
+  \mathbf{T}_{ij} = \mathbf{r}_{i}\times\mathbf{F}_{ij},
+  \qquad
+  \mathbf{T}_{ji} = -\mathbf{r}_{j}\times\mathbf{F}_{ij}.
+  \label{eq:polytope-torque}
+\end{equation}
+Unlike between spheres the normal force has a moment, which is what rights a tilted face onto a floor.
+Both bodies are pushed at the same point, so the contact conserves angular momentum exactly.
+
+Polytopes get no rolling resistance, since their shape resists rolling by itself.
+A flat contact between two faces resists twisting instead, which a spherical point contact does not; without it a block spinning on a floor would never stop.
+The relative spin $\omega_{n}$ about the normal is accumulated into a twisting spring $\theta_{t}$, as the rolling spin is in~\eqref{eq:theta-r}.
+The spring has the tangential stiffness spread evenly over a disc of radius $a$, is damped like the other springs, and is capped at the friction moment of an even pressure on that disc:
+\begin{equation}
+  k_{t} = \tfrac{1}{2}S_{t}a^{2},
+  \qquad
+  M_{t} = -k_{t}\theta_{t} - 2\sqrt{\tfrac{5}{6}}\,\beta\sqrt{k_{t}I^{*}_{n}}\;\omega_{n},
+  \qquad
+  \lvert M_{t}\rvert \le \tfrac{2}{3}\,\mu F_{n}\,a ,
+  \label{eq:twisting}
+\end{equation}
+where $I^{*}_{n}$ is the effective moment of inertia of the two bodies about $\mathbf{n}$.
+A capped spring is reset to the moment it carries, as in Section~\ref{sec:rolling}.
+In the plane every rotation is about $\mathbf{e}_{z}$, which never lies along a contact normal, so there is no twisting.
+
+\subsection{Spheres and polytopes}
+
+A sphere presses on the point of a polytope closest to its centre, as on a wall (Section~\ref{sec:walls}).
+The overlap is the radius of the sphere minus the distance of its centre from the polytope, the normal points from that point towards the centre, and the Hertz law applies with the radius of the sphere as $R^{*}$, that of a sphere on a plane.
+The force acts on the sphere at its radius, as between spheres, and on the polytope in the middle of the overlap.
+Rolling resistance acts only between two spheres and between a sphere and a wall.
+
+\subsection{Walls}
+
+A polytope that presses on a wall overlaps the solid behind it.
+That solid is split among the solid facets: the region of a facet lies behind its plane and between side planes through its edges.
+Between two facets of the same rigid body the side plane bisects the angle between them, so that the regions of neighbouring facets meet without a gap or an overlap, around a convex corner of the domain as well as at the tip of a wedge that juts into it.
+Along an edge shared with an open facet, or with a facet of another body, which may move away from it, the side plane is at right angles to the facet.
+A face of a polyhedron, convex or not, is split into triangles whose regions meet on planes at right angles to the face, so that they add up to the region of the face.
+The overlap of a particle with the region of a facet gives the volume and the centroid of the contact as above, its contact surface is the part of the plane of the facet inside the particle, and its normal is the inward normal of the facet.
+A wall has an infinite mass, so $m^{*}=m_{i}$.
+
+A particle that rests on several coplanar facets, e.g.\ across the joint of a floor made of two faces or across the edge of a footing flush with a wall, makes one contact with them.
+Since $a$ grows with the square root of the area, \eqref{eq:polytope-force} would make that contact stiffer if each part were a contact of its own.
+Each part $k$, of area $S_{k}$, therefore gets the contact radius of the whole surface $S=\sum_{k}S_{k}$, and the shares $w_{k}=S_{k}/S$ of the stiffnesses $S_{n}$ and $S_{t}$ and of the mass $m^{*}$.
+The parts then add up to the force, the stiffness and the damping of a single contact, while each keeps the tangential spring of its own facet.
+
+\subsection{Time step}
+
+The stiffest contact of a polytope is that of its flattest face pressed against a face of another.
+The Rayleigh time step~\eqref{eq:rayleigh} of a polytope is therefore evaluated with the radius of the largest sphere about its centroid that it holds, the distance from the centroid to its closest face plane, instead of $R_{\min}$.
+For a cube this is half its side, and~\eqref{eq:dt} is then about \num{0.3} times the critical time step of two cubes pressed face to face.
+
+\subsection{Closed-form checks}
+
+A square and a cube resting on a floor carry their weight at the mean depth that~\eqref{eq:polytope-force} gives, to a relative error below $10^{-6}$, also when the square straddles the joint of a floor made of two collinear edges.
+A disc on a square and a sphere on a cube rest at the Hertz overlap~\eqref{eq:hertz} of a sphere on a plane.
+A square or a cube dropped on a corner topples and comes to rest on a side or a face.
+A free box spun about its intermediate principal axis turns over again and again, the instability of the tennis racket, while its angular momentum and its kinetic energy stay constant to $10^{-8}$ and $10^{-6}$.
+Two polygons that collide in free space keep their linear momentum to rounding error and their angular momentum to $10^{-6}$.
+These checks are part of the tests of the package (Section~\ref{sec:unit-tests}).

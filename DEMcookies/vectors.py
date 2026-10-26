@@ -40,6 +40,25 @@ def cross(a: npt.NDArray[np.float64], b: npt.NDArray[np.float64]) -> npt.NDArray
     return np.asarray(np.cross(a, b))
 
 
+def cross_3d(a: npt.NDArray[np.float64], b: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """Cross product of 3D vectors along the last axis, for arrays of any leading shapes that broadcast.
+
+    It spells the components out, which is much faster than ``numpy.cross`` on the small arrays of a contact batch.
+
+    Args:
+        a: first vectors, shape (..., 3).
+        b: second vectors, shape (..., 3).
+
+    Returns:
+        The cross products a x b, of the broadcast shape.
+    """
+    out = np.empty(np.broadcast_shapes(a.shape, b.shape))
+    out[..., 0] = a[..., 1] * b[..., 2] - a[..., 2] * b[..., 1]
+    out[..., 1] = a[..., 2] * b[..., 0] - a[..., 0] * b[..., 2]
+    out[..., 2] = a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]
+    return out
+
+
 def spin_cross(spin: npt.NDArray[np.float64], vectors: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """Cross product of rotation vectors with vectors, e.g. the velocity omega x r of a point of a spinning body.
 

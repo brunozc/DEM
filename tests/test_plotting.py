@@ -16,7 +16,8 @@ from PIL import GifImagePlugin, Image
 from DEMcookies import (DEMSimulation, Geometry, Geometry3D, Heaviside, LoadedPlaten, MaterialProperties, Open,
                         Particle, Particle3D, Wall, Water)
 from DEMcookies.plotting import (_chain_loops, _clip_below, _current_outline, _current_polyhedron, _facet_label,
-                                 _plane_crossings, plot_load_curves, render_animation, render_frame)
+                                 _plane_crossings, _sections, plot_load_curves, render_animation, render_frame)
+from DEMcookies.shapes import ConvexPolygon, ConvexPolyhedron
 
 MATERIAL = MaterialProperties(density=2500.0, youngs_modulus=5.0e6, poisson_ratio=0.25, restitution=0.1, friction=0.5)
 
@@ -274,3 +275,45 @@ class TestPlotting3D:
         assert _facet_label((3, ), "face") == "face 3"
         assert _facet_label((3, 4, 5), "face") == "faces 3-5"
         assert _facet_label((1, 4), "edge") == "edges 1, 4"
+
+
+class TestShapePlotting:
+    """Tests of the drawing of polygonal and polyhedral particles."""
+
+    def test_polygons_are_drawn(self, tmp_path: Path) -> None:
+        """A snapshot of a 2D simulation with a polygon and a disc must be written."""
+        square = ConvexPolygon.rectangle(1.0, 1.0)
+        sim = DEMSimulation(
+            Geometry.rectangle(0.05, 0.05),
+            MATERIAL,
+            particles=[Particle(0.015, 0.012, 0.008, shape=square, angle=0.4),
+                       Particle(0.035, 0.012, 0.008)])
+        sim.rest(0.01, record_every=5)
+        render_frame(sim, str(tmp_path / "polygons.png"))
+        assert (tmp_path / "polygons.png").stat().st_size > 0
+
+    def test_polyhedra_are_drawn_in_both_views(self, tmp_path: Path) -> None:
+        """Snapshots of a 3D simulation with polyhedra must be written in the oblique view and in a section."""
+        cube = ConvexPolyhedron.box(1.0, 1.0, 1.0)
+        sim = DEMSimulation(
+            Geometry3D.box(0.05, 0.05, 0.05),
+            MATERIAL,
+            particles=[Particle3D(0.015, 0.012, 0.025, 0.008, shape=cube),
+                       Particle3D(0.035, 0.012, 0.025, 0.008)])
+        sim.rest(0.01, record_every=5)
+        render_frame(sim, str(tmp_path / "oblique.png"))
+        render_frame(sim, str(tmp_path / "section.png"), section=0.025)
+        assert (tmp_path / "oblique.png").stat().st_size > 0 and (tmp_path / "section.png").stat().st_size > 0
+
+    def test_section_of_a_cube_is_a_square(self) -> None:
+        """A plane through the middle of an upright cube must cut a square out of it."""
+        cube = ConvexPolyhedron.box(1.0, 1.0, 1.0)
+        sim = DEMSimulation(Geometry3D.box(0.05, 0.05, 0.05),
+                            MATERIAL,
+                            particles=[Particle3D(0.025, 0.02, 0.025, cube.equivalent_radius * 0.01, shape=cube)])
+        sim.rest(0.001, record_every=1)
+        rows, polygons = _sections(sim.frames[0], 0.025)
+        assert list(rows) == [0]
+        assert_allclose(np.ptp(polygons[0], axis=0), [0.01, 0.01], rtol=1e-9)
+        rows, polygons = _sections(sim.frames[0], 0.04)
+        assert rows.size == 0

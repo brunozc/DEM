@@ -208,6 +208,18 @@ manual (Table~\ref{tab:modules}).
     \texttt{particle\_generation.py} &
       \texttt{Particle}, \texttt{Particle3D}, \texttt{generate\_lattice\_particles} &
       Section~\ref{sec:deposition} \\
+    \texttt{shapes.py} &
+      \texttt{ConvexPolygon}, \texttt{ConvexPolyhedron} &
+      Section~\ref{sec:polytopes} \\
+    \texttt{polytopes.py} &
+      table of shapes, rotations &
+      Section~\ref{sec:polytope-numerics} \\
+    \texttt{overlap.py} &
+      overlap of polytopes &
+      Section~\ref{sec:polytope-numerics} \\
+    \texttt{regions.py} &
+      solid behind the walls, split among their facets &
+      Section~\ref{sec:polytopes} \\
     \texttt{solver.py} &
       \texttt{VelocityVerlet}, \texttt{DEMSimulation}, \texttt{RainSettings} &
       Chapter~\ref{cha:numerical} \\
@@ -250,6 +262,8 @@ mind when interpreting results.
         therefore best interpreted as a planar arrangement of spheres rather
         than as a plane-strain slice of a cylinder
         (see Section~\ref{sec:massprops}).
+        Polygonal and polyhedral particles have the mass of the sphere of their equivalent radius too
+        (Section~\ref{sec:polytopes}).
   \item \textbf{Single material.}  All particles and all boundaries share the
         same density, Young's modulus, Poisson ratio and restitution
         coefficient, so the effective contact constants $E^{*}$, $G^{*}$ and
@@ -263,7 +277,9 @@ mind when interpreting results.
   \item \textbf{No cohesion.}  Contacts transmit only compression, viscous
         damping, Coulomb friction and, optionally, a rolling resistance moment
         that stands in for the angular shape of real
-        grains~(Section~\ref{sec:rolling}).  Adhesive forces, liquid bridges and
+        grains~(Section~\ref{sec:rolling}).
+        Convex polygonal and polyhedral particles represent that shape directly, and their face contacts also resist
+        twisting (Section~\ref{sec:polytopes}); concave grains are not modelled.  Adhesive forces, liquid bridges and
         particle breakage are not modelled.
   \item \textbf{Dry or saturated system.}  By default there is no interstitial
         fluid.  Optionally the particles are immersed in water below a water
