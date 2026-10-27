@@ -134,9 +134,10 @@ formulation and the numerics.
 
 Measuring how polygons and polyhedra overlap is most of the work of a simulation with shaped particles, and a GPU does
 it many times faster. With `device="gpu"` a simulation keeps the shapes on the GPU and measures the overlaps there with
-[CuPy](https://cupy.dev), while everything else, spheres included, stays on the CPU; the results agree with those of
-the CPU to rounding. CuPy is optional: install it with `pip install -e ".[gpu]"` (for CUDA 12), or a CuPy build that
-suits your CUDA. The default, `device="cpu"`, needs NumPy only.
+[CuPy](https://cupy.dev), while everything else, spheres included, stays on the CPU. The forces agree with those of the
+CPU to rounding, and a run on either device repeats itself exactly; over many steps the two devices drift apart, as any
+change of rounding makes a granular flow do. CuPy is optional: install it with `pip install -e ".[gpu]"` (for CUDA 12),
+or a CuPy build that suits your CUDA. The default, `device="cpu"`, needs NumPy only.
 
 ```python
 sim = DEMSimulation(geometry, material, radius_range=(0.004, 0.02), shapes=shapes, device="gpu")

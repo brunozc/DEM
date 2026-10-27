@@ -6,7 +6,8 @@ tests whether the water still matters once the ballast is bedded. Every packing 
 is
 
 * preloaded dry: it is loaded as in the dry case of ``ballast_cyclic_3d.py``, from the same deposit, with the same rest
-  before the first load and the same load, by default for 50 cycles, so the preload repeats that run step for step;
+  before the first load and the same load, by default for 50 cycles, so the preload repeats that run step for step
+  when both run on the same device;
 * flooded at the end of the last cycle of the preload, when the rail seat is unloaded: the water rises at once to the
   level of the case, and the load stays at its trough for 0.3 s, as long as the rest before the first load of
   ``ballast_cyclic_3d.py``. The sleeper stays free on the ballast meanwhile, under its own weight less the uplift of

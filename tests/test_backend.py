@@ -12,6 +12,7 @@ from DEMcookies import ConvexPolyhedron, DEMSimulation, Geometry3D, MaterialProp
 from DEMcookies.backend import array_module, check_device, gpu_module, to_device, to_host
 from DEMcookies.overlap import Polyhedra, polyhedron_overlap, polyhedron_region_overlap
 from DEMcookies.polytopes import PolytopeTable, place, random_orientations
+from DEMcookies.vectors import scatter_add
 
 
 def _has_gpu() -> bool:
@@ -120,6 +121,24 @@ class TestGPU:
         on_gpu.rest(0.05)
         assert_allclose(on_gpu.pos, on_cpu.pos, atol=1e-9)
         assert_allclose(on_gpu.force, on_cpu.force, atol=1e-9 * float(np.abs(on_cpu.force).max()))
+
+    def test_sums_on_the_gpu_match_the_cpu(self) -> None:
+        """Scalars and vectors summed into bins on the GPU must match the CPU, also with no values at all."""
+        cupy = gpu_module()
+        rng = np.random.default_rng(0)
+        index = rng.integers(0, 50, 1000)
+        for values in (rng.normal(size=1000), rng.normal(size=(1000, 3))):
+            on_gpu = to_host(scatter_add(cupy.asarray(index), cupy.asarray(values), 60))
+            assert_allclose(on_gpu, scatter_add(index, values, 60), rtol=0.0, atol=1e-13)
+        assert to_host(scatter_add(cupy.zeros(0, dtype=np.int64), cupy.zeros((0, 3)), 4)).shape == (4, 3)
+
+    def test_runs_on_the_gpu_repeat_themselves(self) -> None:
+        """Two runs of the same simulation on the GPU must agree to the last bit."""
+        first, second = _sim("gpu"), _sim("gpu")
+        first.rest(0.05)
+        second.rest(0.05)
+        assert_allclose(second.pos, first.pos, rtol=0.0, atol=0.0)
+        assert_allclose(second.omega, first.omega, rtol=0.0, atol=0.0)
 
     def test_gpu_checkpoint_carries_on_on_the_cpu(self) -> None:
         """A simulation pickled on the GPU must hold nothing of the GPU and carry on on the CPU."""

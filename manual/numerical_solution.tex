@@ -933,7 +933,9 @@ The overlaps can be measured on a GPU instead, with CuPy, the counterpart of Num
 The functions that measure them take the array module of their arguments, NumPy or CuPy, so the same code runs on either device.
 A simulation on the device \texttt{gpu} keeps a copy of the table of shapes in the memory of the GPU, made again whenever the table is replaced, places the polytopes there at every force evaluation from their positions and orientations, and measures their overlaps there.
 Only the volumes, centroids and contact surfaces come back to the CPU, which computes everything else, the contact law included.
-The results agree with those of the CPU to rounding, about $10^{-10}$ of the largest force.
+The forces agree with those of the CPU to rounding, about $10^{-10}$ of the largest force.
+A GPU adds the floating-point values of a sum in an order that changes from run to run, so the pieces of the overlaps are sorted by contact and summed in a fixed order instead, which makes a run on the GPU repeat itself exactly, as one on the CPU does.
+The two devices round differently, though, and over many steps their runs drift apart, as any change of rounding makes a granular flow do.
 A pickled simulation holds nothing in the memory of the GPU, so a checkpoint made on one device carries on on the other.
 
 \paragraph{Cost.}

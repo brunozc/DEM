@@ -430,7 +430,7 @@ def _solid_overlap(count: int, origin: npt.NDArray[np.float64], normals: npt.NDA
     height = offsets[pair, plane]
     moment = cross_3d(p, q)
     volume = height * xp.einsum("ij,ij->i", normal, moment) / 6.0
-    measure = xp.bincount(pair, volume, count)
+    measure = scatter_add(pair, volume, count)
     first = scatter_add(pair, volume[:, None] * (height[:, None] * normal + p + q) / 4.0, count)
     on_surface = surface_planes[plane]
     surface = scatter_add(pair[on_surface], 0.5 * moment[on_surface], count)

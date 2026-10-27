@@ -142,6 +142,9 @@ REST_TIME = 0.3
 # waves of each rain pass: a layer is full after about 30, after which the waves only drop the odd small grain into
 # the gaps of its surface, over a large area for ever
 RAIN_WAVES = 50
+# polyhedra are placed by the spheres that hold them, so a wave places about two thirds as many as of spheres (138 of
+# 204 in the first wave of the first pass); half again as many waves give their layers as much time to fill
+POLYHEDRA_RAIN_WAVES = 75
 # safety limit of the deposition, far above what a packing needs
 MAX_GRAINS = 30000
 # records per load cycle of the sleeper, of the forces on the faces and of the excess pore pressure
@@ -425,7 +428,7 @@ def deposit(packing: int,
                          settle_steps=settle,
                          record_every=settle_steps,
                          max_particles=MAX_GRAINS,
-                         max_steps=RAIN_WAVES * steps_between,
+                         max_steps=(POLYHEDRA_RAIN_WAVES if grains == "polyhedra" else RAIN_WAVES) * steps_between,
                          seed=seed))
         if sim.n >= MAX_GRAINS:
             raise RuntimeError(f"The deposition of packing {packing} stopped at {MAX_GRAINS} grains.")
