@@ -33,6 +33,30 @@ HALF_STENCIL_OFFSETS_3D: Tuple[Tuple[int, int, int],
 # bounds the memory that queries over many points, such as the sampling of the domain, need.
 QUERY_CHUNK_SIZE = 200000
 
+# Smallest distance from the centre to a face of the hull of the unit directions drawn for a random polyhedron. A
+# regular tetrahedron has 1/3; a draw below this bound is a sliver and is drawn again.
+MIN_CENTRE_CLEARANCE = 0.2
+
+# Smallest squared sine of the angle between two planes for the line where they meet to bound the overlap of two
+# polytopes. Planes closer to parallel than this meet far away, or not at all, and give no edge.
+PARALLEL_PLANES_TOLERANCE = 1.0e-12
+
+# Smallest squared length of the difference of the in-plane directions of two facets that meet at an edge, below which
+# the facets fold back onto each other and the plane between their regions is the one at right angles to the first.
+FOLD_TOLERANCE = 1.0e-12
+
+# Largest difference, relative to the particle radius, between the unit normals and between the offsets of two facets
+# that a polytope touches for them to lie in one plane and share one contact surface.
+COPLANAR_TOLERANCE = 1.0e-6
+
+# Relative growth of the second body of a pair of polytopes, or push of the planes of a region against the size of a
+# polytope, before their overlap is measured. Faces of the two bodies that lie in one plane, as the tops of aligned
+# boxes do, would otherwise both bound the overlap; the growth leaves one of them inside the other body.
+OVERLAP_TIE_BREAK = 1.0e-9
+
+# Moment of inertia of a sphere about its centre over m R^2.
+SPHERE_INERTIA_FACTOR = 0.4
+
 # Bit shift used to pack a particle pair (i, j) into the single integer key (i << shift) | j.
 PAIR_KEY_SHIFT = 32
 

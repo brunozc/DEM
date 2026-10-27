@@ -2,6 +2,8 @@
 
 Features:
     Spherical particles with uniformly distributed random radii, in a plane (2D) or in space (3D).
+    Convex polygonal (2D) and polyhedral (3D) particles, alone or mixed with spheres, whose contacts follow from the
+    region where two bodies overlap.
     Gravity ("raining") deposition to build the initial packing.
     Hertz-Mindlin (no-slip) contact law with tangential history and rotation.
     A polygonal (2D) or polyhedral (3D) domain whose facets are each a wall, open, or a loaded platen.
@@ -21,12 +23,15 @@ from .geometry3d import Domain, Geometry3D
 from .globals import GlobalSettings
 from .loads import Heaviside, Pulse, Sinusoidal, TimeHistory
 from .particle_generation import Particle, Particle3D, generate_lattice_particles
+from .shapes import ConvexPolygon, ConvexPolyhedron
 from .solver import ContactList, DEMSimulation, Frame, LoadCurve, RainSettings, VelocityVerlet
 from .water import Water
 
 __all__ = [
     "BoundaryCondition",
     "ContactList",
+    "ConvexPolygon",
+    "ConvexPolyhedron",
     "DEMSimulation",
     "Domain",
     "Frame",

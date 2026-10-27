@@ -866,3 +866,76 @@ The section of a domain extruded from a polygon is that polygon, so it looks lik
 The cost of a step remains essentially linear in $N$.
 Filling a box of the same size takes many more particles in 3D than in 2D, though, and each particle has more neighbours.
 A step of the square footing example, \texttt{examples/square\_footing\_3d.py}, with \num{552} particles in a box of ten faces, takes about \qty{2.2}{\milli\second}, and the whole example runs in under a minute.
+
+\section{Polygonal and polyhedral particles}
+\label{sec:polytope-numerics}
+
+\paragraph{State.}
+The shapes of all particles are kept in one table, padded to common numbers of vertices, faces and edges, so that a batch of contacts gathers the shapes of its particles at once.
+A row holds the vertices of a shape in its body frame, scaled to the radius of the particle, the outward normals and offsets of its faces (of its edges in 2D), the two vertices of each edge with the faces on either side of it, and the vertices of each face.
+A sphere has an empty row: padding planes have a zero normal and a unit offset, so every point lies inside them and they cut nothing.
+The table is never changed, only replaced when particles are added or removed, so that recorded frames can share it.
+The orientations are kept as an array of angles in 2D and of quaternions in 3D.
+Every force evaluation starts by placing the polytopes: their vertices, face normals and face offsets in space.
+
+\paragraph{Contact detection.}
+The cell grid and the neighbour list of Sections~\ref{sec:broadphase} and~\ref{sec:verlet} work on the spheres about the centroids that hold the particles, whose radius is the distance to the farthest vertex.
+A rotation does not move such a sphere, so the rebuild criterion~\eqref{eq:rebuild} stays valid.
+The candidate pairs are split into pairs of two spheres, which are evaluated as before, pairs of a sphere and a polytope, and pairs of two polytopes, each kind in a batch of its own.
+The facets near a polytope are likewise found with its bounding sphere.
+
+\paragraph{Overlap of two polytopes.}
+The volume and the centroid of the overlap $\Omega$ follow from its boundary with the divergence theorem, without building $\Omega$ itself.
+The boundary is cut into pieces, each a segment from $\mathbf{p}$ to $\mathbf{q}$ on a face of $\Omega$, running counter-clockwise about the outward normal $\mathbf{n}$ of that face, whose plane is $\mathbf{n}\cdot\mathbf{x}=h$ relative to a reference point.
+With the foot $h\mathbf{n}$ of the reference point on that plane, a piece spans a tetrahedron of signed volume and first moment
+\begin{equation}
+  \Delta V = \tfrac{1}{6}\,h\,\mathbf{n}\cdot(\mathbf{p}\times\mathbf{q}),
+  \qquad
+  \Delta(V\mathbf{x}_{c}) = \tfrac{1}{4}\,\Delta V\,(h\mathbf{n}+\mathbf{p}+\mathbf{q}),
+  \label{eq:tetrahedron}
+\end{equation}
+and these add up to the volume and the first moment of $\Omega$, whatever the order of the pieces.
+In the plane each piece spans a triangle with the reference point instead.
+The pieces are found by clipping lines to the half-spaces of the two bodies with the algorithm of Cyrus and Beck~\cite{cyrus1978}, which works on whole batches of contacts.
+They are the parts of the edges of each body that lie inside the other body, each of which bounds the two faces on either side of its edge, in opposite directions.
+In 3D they are also the parts, inside both bodies, of the lines where a face $a$ of one body meets a face $b$ of the other; the piece on face $a$ runs along $\mathbf{n}_{a}\times\mathbf{n}_{b}$ and the piece on face $b$ the other way.
+The contact surface~\eqref{eq:contact-surface} is half the sum of $\mathbf{p}\times\mathbf{q}$ over the pieces on the faces of $j$.
+Before any clipping, the pairs that a face plane of either body separates, the edges with both ends beyond one plane of the other body, and the pairs of faces that do not each cross the plane of the other are left out, which leaves a few pieces per contact.
+The region behind a wall has no edges of its own: they lie where two of its planes meet, and are clipped as the other lines are.
+
+\paragraph{Coincident faces.}
+A face of one body may lie in the plane of a face of the other, as the tops of two aligned boxes do.
+Both faces then bound $\Omega$ on that plane, and its part there would be counted twice.
+Body $j$, or the region behind a wall, is therefore grown about a point inside it by a relative \num{e-9} before the overlap is measured.
+The face of $i$ then lies strictly inside $j$, and the forces change by a negligible amount.
+
+\paragraph{Rotations.}
+Polygons turn in the drift of the velocity-Verlet scheme of Section~\ref{sec:integration}, $\theta_{i}\leftarrow\theta_{i}+\Delta t\,\omega_{i}$.
+For a polyhedron the kicks change the angular momentum $\mathbf{L}_{i}=\mathbf{I}_{i}\boldsymbol{\omega}_{i}$ of~\eqref{eq:euler-polyhedron}, $\mathbf{L}_{i}\leftarrow\mathbf{L}_{i}+\tfrac{1}{2}\Delta t\,\mathbf{T}_{i}$, and the angular velocity follows as $\mathbf{I}_{i}^{-1}\mathbf{L}_{i}$ with the current orientation.
+In the drift the angular momentum stays the same.
+The orientation turns by the rotation vector $\Delta t\,\boldsymbol{\omega}^{*}_{i}$, where $\boldsymbol{\omega}^{*}_{i}$ is the angular velocity that $\mathbf{L}_{i}$ gives at the orientation turned half way by $\tfrac{1}{2}\Delta t\,\boldsymbol{\omega}_{i}$, which makes the turn accurate to second order.
+A rotation vector $\boldsymbol{\phi}$ turns a quaternion as $q\leftarrow(\cos\tfrac{\phi}{2},\,\sin\tfrac{\phi}{2}\,\boldsymbol{\phi}/\phi)\otimes q$, which is then normalised against drift.
+The angular velocity is recomputed from $\mathbf{L}_{i}$ at the new orientation, for the force evaluation that follows.
+Spheres keep the update of Section~\ref{sec:integration}, so a simulation of spheres gives the same results as before polytopes were added, to the last bit.
+
+\paragraph{Deposition and seating.}
+A rained particle draws its shape at random from a list of shapes, in which a missing shape stands for a sphere, and a random orientation: a uniform angle in 2D, and a normalised four-dimensional Gaussian vector, which is uniform over all rotations, in 3D.
+It is placed so that its bounding sphere overlaps nothing, and the default insertion band is lowered so that the largest bounding sphere fits under the top of the domain.
+A loaded body is seated on the spheres and on the vertices of the polytopes, which count as points of zero radius.
+
+\paragraph{Output.}
+A frame of a simulation with polytopes also stores their orientations and shares the table of shapes.
+The plots draw a polygon as its outline, and a polyhedron as its faces in the oblique view and as the polygon that the section plane cuts out of it in a section.
+The VTK export writes a fifth series, \texttt{shapes}, with the outline of every polygon or the faces of every polyhedron as polygons, and flags the spheres in the series of the particles, so that the ParaView script draws only those as Gaussian spheres.
+
+\paragraph{Device.}
+The overlaps can be measured on a GPU instead, with CuPy, the counterpart of NumPy for GPUs.
+The functions that measure them take the array module of their arguments, NumPy or CuPy, so the same code runs on either device.
+A simulation on the device \texttt{gpu} keeps a copy of the table of shapes in the memory of the GPU, made again whenever the table is replaced, places the polytopes there at every force evaluation from their positions and orientations, and measures their overlaps there.
+Only the volumes, centroids and contact surfaces come back to the CPU, which computes everything else, the contact law included.
+The results agree with those of the CPU to rounding, about $10^{-10}$ of the largest force.
+A pickled simulation holds nothing in the memory of the GPU, so a checkpoint made on one device carries on on the other.
+
+\paragraph{Cost.}
+A contact between polytopes costs far more than one between spheres: gathering the shapes, filtering, clipping and summing take a few hundred array operations per batch, and the clipping grows with the numbers of faces and edges near the contact.
+A step of a bed of \num{45} polyhedra with ten to fourteen vertices each and some \num{45} contacts takes about \qty{6}{\milli\second}, against about \qty{1}{\milli\second} for as many spheres.

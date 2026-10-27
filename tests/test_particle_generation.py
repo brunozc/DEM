@@ -9,6 +9,7 @@ from DEMcookies.boundary import Open, Wall
 from DEMcookies.geometry import Geometry
 from DEMcookies.geometry3d import Geometry3D
 from DEMcookies.particle_generation import Particle3D, generate_lattice_particles
+from DEMcookies.shapes import ConvexPolygon, ConvexPolyhedron
 
 
 class TestGenerateLatticeParticles:
@@ -83,3 +84,52 @@ class TestGenerateLatticeParticles3D:
         """Requesting more particles than lattice sites must be reported."""
         with pytest.raises(ValueError, match=re.escape("lattice sites fit in the domain, but 1000 particles")):
             generate_lattice_particles(Geometry3D.box(0.1, 0.1, 0.1), 1000, (0.005, 0.01))
+
+
+class TestGenerateShapedParticles:
+    """Tests of generate_lattice_particles with shapes."""
+
+    def test_shapes_fit_without_overlap(self) -> None:
+        """Shaped particles must be spaced by the spheres that hold them, in random orientations."""
+        shape = ConvexPolygon.rectangle(3.0, 1.0)
+        particles = generate_lattice_particles(Geometry.rectangle(0.3, 0.3),
+                                               30, (0.005, 0.008),
+                                               seed=1,
+                                               shapes=[shape, None])
+        positions = np.array([[p.x, p.y] for p in particles])
+        reach = np.array([p.radius * (1.0 if p.shape is None else shape.circumradius) for p in particles])
+        delta = positions[:, None, :] - positions[None, :, :]
+        gap = np.hypot(delta[..., 0], delta[..., 1]) - (reach[:, None] + reach[None, :])
+        np.fill_diagonal(gap, np.inf)
+        assert gap.min() >= 0.0
+        kinds = {p.shape is None for p in particles}
+        assert kinds == {True, False}
+        assert len({round(p.angle, 6) for p in particles if p.shape is not None}) > 1
+
+    def test_spheres_are_unchanged_by_the_option(self) -> None:
+        """Without shapes the generator must place the same spheres as before the option existed."""
+        geometry = Geometry3D.box(0.1, 0.1, 0.1)
+        plain = generate_lattice_particles(geometry, 10, (0.004, 0.006), seed=2)
+        assert all(p.shape is None and p.orientation == (1.0, 0.0, 0.0, 0.0) for p in plain)
+
+    def test_polyhedra_get_unit_quaternions(self) -> None:
+        """Polyhedra must be turned by unit quaternions."""
+        particles = generate_lattice_particles(Geometry3D.box(0.1, 0.1, 0.1),
+                                               8, (0.004, 0.006),
+                                               shapes=[ConvexPolyhedron.tetrahedron()])
+        assert all(isinstance(p.shape, ConvexPolyhedron) for p in particles)
+        assert np.allclose([np.linalg.norm(p.orientation) for p in particles], 1.0)
+
+    def test_shapes_of_the_other_dimension_are_rejected(self) -> None:
+        """Polyhedra cannot be placed in a polygon."""
+        with pytest.raises(ValueError,
+                           match=re.escape("Shape 0 is a ConvexPolyhedron, but a 2D simulation needs "
+                                           "polygons.")):
+            generate_lattice_particles(Geometry.rectangle(0.1, 0.1),
+                                       5, (0.004, 0.006),
+                                       shapes=[ConvexPolyhedron.tetrahedron()])
+
+    def test_empty_list_of_shapes_is_rejected(self) -> None:
+        """An empty list of shapes must be rejected."""
+        with pytest.raises(ValueError, match=re.escape("shapes must not be empty; use None for spheres.")):
+            generate_lattice_particles(Geometry.rectangle(0.1, 0.1), 5, (0.004, 0.006), shapes=[])

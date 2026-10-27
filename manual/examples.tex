@@ -1251,6 +1251,81 @@ The force on the floor follows the fixed-bed prediction $1-F_{f}/W'$ up to $U_{m
   \label{fig:examples-3d-seepage}
 \end{figure}
 
+\section{Angular grains}
+\label{sec:angular}
+
+Two scripts in \texttt{examples/} fill a box with the polygonal and polyhedral particles of Section~\ref{sec:polytopes} and press a footing into them.
+Their figures, and the animation of the second, which is kept in \texttt{examples/videos/}, are produced with
+\begin{verbatim}
+  python manual/scripts/angular.py
+\end{verbatim}
+
+\subsection{Strip footing on discs and on polygons}
+
+The script \texttt{examples/angular\_grains.py} presses the same strip footing into three fills of the same grading: discs that roll freely, discs with the rolling resistance $\mu_{r}=0.2$ of Section~\ref{sec:rolling}, and polygons without it.
+The polygons are four irregular shapes, the hulls of five to seven random points on an ellipse with an aspect ratio of \num{1.3}, in random orientations.
+Each has the area of the disc of its radius, so the three fills also have the same mass.
+The box is \qty{0.24}{\metre} wide and \qty{0.2}{\metre} high, with rough walls, and its top is open apart from a footing \qty{50}{\milli\metre} wide in the middle, a loaded platen of \qty{50}{\gram} with self weight.
+The material is that of the reference simulation with $e=0.3$, and the grains have radii of \qtyrange{5}{8}{\milli\metre}.
+Each fill is rained full, the footing is seated on it, and the load is ramped to \qty{6}{\newton} in \qty{0.8}{\second}.
+
+The discs without rolling resistance fail (Table~\ref{tab:angular}, Figure~\ref{fig:angular}): beyond about \qty{3.8}{\newton} the footing punches into the fill, and it ends \qty{73.5}{\milli\metre} deep.
+Rolling resistance holds the footing up, as it does in the ballast study of Section~\ref{sec:ballast}, and the polygons hold it up as well, without any rolling resistance, and settle the least.
+Each fill is a single realisation, so the numbers are only indicative.
+
+\begin{table}[htbp]
+  \centering
+  \caption{Strip footing on three fills of the same grading, under a ramp of the load to \qty{6}{\newton}.}
+  \label{tab:angular}
+  \begin{tabular}{lS[table-format=3.0]S[table-format=2.2]}
+    \toprule
+    Fill & {Grains} & {Settlement at \qty{6}{\newton} [\unit{\milli\metre}]} \\
+    \midrule
+    discs & 252 & 73.47 \\
+    discs with rolling resistance & 246 & 11.35 \\
+    polygons & 246 & 6.21 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.7\textwidth]{figures/angular_grains_curves.png}
+  \par\medskip
+  \begin{subfigure}[b]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/angular_grains_discs.png}
+    \caption{discs}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.48\textwidth}
+    \centering
+    \includegraphics[width=\textwidth]{figures/angular_grains_polygons.png}
+    \caption{polygons}
+  \end{subfigure}
+  \caption{Strip footing on discs and on polygons: the applied load against the settlement for the three fills (top), and the discs and the polygons under the peak load (bottom), coloured by their speed.}
+  \label{fig:angular}
+\end{figure}
+
+\subsection{Square footing on polyhedral stones}
+
+The script \texttt{examples/angular\_grains\_3d.py} fills a box \qty{0.12}{\metre} wide, deep and high with irregular polyhedral stones, the hulls of ten to fourteen random points on ellipsoids, some elongated and some flaky, as crushed rock such as railway ballast.
+The top of the box is split into a square footing of side \qty{50}{\milli\metre}, a loaded platen of \qty{0.1}{\kilogram} with self weight, and four open faces around it, as in the square footing example of Section~\ref{sec:examples-3d}.
+The stones have radii of \qtyrange{8}{11}{\milli\metre}, the material has $\mu=0.6$, $e=0.3$ and no rolling resistance, and the time step, set by the closest face of the flattest stone, is \qty{1.0e-4}{\second}.
+The box is rained full with \num{155} stones, to a bed top at \qty{90}{\milli\metre}; the footing is seated on the bed, and the load is ramped to \qty{15}{\newton} in \qty{0.4}{\second}, held for \qty{0.2}{\second} and removed in \qty{0.2}{\second}.
+The reaction follows the load plus the weight of the footing throughout (Figure~\ref{fig:angular-3d}).
+The footing settles nearly \qty{10}{\milli\metre} under the peak load and keeps \qty{7.0}{\milli\metre} once the load is removed, when its reaction, \qty{0.94}{\newton} at the end of the run, oscillates about its weight of \qty{0.98}{\newton}.
+The run takes about twelve minutes on one core, more than ten times as long as the square footing on \num{552} spheres (Section~\ref{sec:3d-numerics}).
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=0.48\textwidth]{figures/angular_grains_3d_section.png}
+  \par\medskip
+  \includegraphics[width=\textwidth]{figures/angular_grains_3d_curves.png}
+  \caption{Square footing on polyhedral stones: the section through the middle of the box at the end of the run, in which every stone that the plane cuts is drawn as its section, coloured by its speed (top), and the load history and the load--displacement response of the footing (bottom).}
+  \label{fig:angular-3d}
+\end{figure}
+
 \section{Suggested further studies}
 \label{sec:further}
 

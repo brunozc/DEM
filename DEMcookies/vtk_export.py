@@ -1,12 +1,15 @@
 """Export of the state of a simulation to VTK files, to be viewed in ParaView.
 
-A ``VTKWriter`` writes the state of a simulation as four time series of VTK PolyData files (``.vtp``), each with a
+A ``VTKWriter`` writes the state of a simulation as five time series of VTK PolyData files (``.vtp``), each with a
 ParaView data collection (``.pvd``) that lists its files with their simulation time:
 
 * ``particles``: the centre of every particle, as a point, with its radius, velocity, angular velocity, coordination
-  number and stress, and, when there is water, its porosity, the force of the water on it and, for coupled water, the
-  excess pore pressure. ParaView draws the points as spheres of their true size with its Point Gaussian
-  representation, scaled by the radius.
+  number and stress, whether it is a sphere, and, when there is water, its porosity, the force of the water on it and,
+  for coupled water, the excess pore pressure. ParaView draws the points of the spheres as spheres of their true size
+  with its Point Gaussian representation, scaled by the radius.
+* ``shapes``: the outline of every polygonal particle (2D), or the faces of every polyhedral particle (3D), as
+  polygons in space, with the index, velocity, angular velocity, coordination number and mean stress of the particle;
+  empty when every particle is a sphere.
 * ``contacts``: a line for every contact, between the centres of two particles or from the centre of a particle to
   where it touches a facet, with its normal force, tangential force and overlap. Drawn as tubes that grow thicker
   with the normal force, the strongest contacts are the force chains that carry the load through the packing.
@@ -15,7 +18,7 @@ ParaView data collection (``.pvd``) that lists its files with their simulation t
 * ``water``: the free surface of the water across the domain, empty while the particles are dry.
 
 The writer also puts a ParaView script, ``paraview_setup.py``, next to the collections. Run in ParaView, it opens the
-four series and shows them in two views whose cameras move together: the particles coloured by their speed, and the
+five series and shows them in two views whose cameras move together: the particles coloured by their speed, and the
 force chains with the facets coloured by their pressure.
 
 A 2D simulation is written in the plane z = 0, with its rotations about the z axis. The stress of a particle is its
@@ -33,6 +36,7 @@ import numpy.typing as npt
 
 from .boundary import LoadedPlaten, Open
 from .geometry3d import Geometry3D
+from .polytopes import frame_polygons
 from .solver import ContactList, DEMSimulation
 from .vectors import norm, scatter_add
 from .water import evaluate_at
@@ -41,7 +45,7 @@ from .water import evaluate_at
 DataArray = Union[npt.NDArray[np.float64], npt.NDArray[np.int64]]
 
 # the series written at every export, each to a subfolder and a collection of its own name
-SERIES = ("particles", "contacts", "boundary", "water")
+SERIES = ("particles", "contacts", "boundary", "water", "shapes")
 
 # name of the ParaView script written next to the collections
 PARAVIEW_SCRIPT = "paraview_setup.py"
@@ -58,10 +62,10 @@ _PARAVIEW_SCRIPT_TEXT = """\
 #
 #     paraview --script=paraview_setup.py
 #
-# Two views side by side, whose cameras move together, show the particles as spheres of their true size coloured by
-# their speed, and the force chains, the contacts drawn as tubes that grow thicker with their normal force, with the
-# facets coloured by the pressure of the particles on them. Open facets are not drawn. The views open at the end of
-# the run, and every colour map spans the values of the time shown.
+# Two views side by side, whose cameras move together, show the particles, spheres of their true size and polygons
+# or polyhedra, coloured by their speed, and the force chains, the contacts drawn as tubes that grow thicker with
+# their normal force, with the facets coloured by the pressure of the particles on them. Open facets are not drawn. The
+# views open at the end of the run, and every colour map spans the values of the time shown.
 
 import os
 
@@ -111,6 +115,7 @@ particles = open_series("particles")
 contacts = open_series("contacts")
 boundary = open_series("boundary")
 water = open_series("water")
+shapes = open_series("shapes")
 scene = GetAnimationScene()
 scene.UpdateAnimationUsingDataTimeSteps()
 scene.GoToLast()
@@ -136,7 +141,10 @@ layout.SplitHorizontal(0, 0.5)
 right = CreateView("RenderView")
 AssignViewToLayout(view=right, layout=layout, hint=2)
 
-spheres = Show(particles, left)
+# the points of polygons and polyhedra are left out, since their shapes are drawn instead
+round_ones = Threshold(registrationName="spheres", Input=particles, Scalars=["POINTS", "sphere"], LowerThreshold=1,
+                       UpperThreshold=1)
+spheres = Show(round_ones, left)
 spheres.SetRepresentationType("Point Gaussian")
 spheres.ShaderPreset = "Sphere"
 spheres.ScaleByArray = 1
@@ -144,6 +152,7 @@ spheres.UseScaleFunction = 0
 spheres.SetScaleArray = ["POINTS", "radius"]
 spheres.GaussianRadius = 1.0
 colour_by(spheres, left, ("POINTS", "velocity"), "Magnitude")
+colour_by(Show(shapes, left), left, ("CELLS", "velocity"), "Magnitude")
 colour_by(Show(chains, right), right, ("POINTS", "normal_force"))
 # facets are see-through in 3D, so that they do not hide the particles
 paint(Show(walls, left), WALL_COLOUR, 1.0 if flat else 0.25)
@@ -258,11 +267,13 @@ class VTKWriter:
                 stream.write(_PARAVIEW_SCRIPT_TEXT)
         pairs, walls = sim.contacts()
         index = len(self.times)
+        coordination, stress = _particle_stress(sim, pairs, walls)
         data = {
-            "particles": _particle_data(sim, pairs, walls),
+            "particles": _particle_data(sim, coordination, stress),
             "contacts": _contact_data(sim, pairs, walls),
             "boundary": _boundary_data(sim, walls),
             "water": _water_data(sim),
+            "shapes": _shape_data(sim, coordination, stress),
         }
         for name in SERIES:
             _write_polydata(os.path.join(self.directory, _series_file(name, index)), data[name])
@@ -344,19 +355,19 @@ def _particle_stress(sim: DEMSimulation, pairs: ContactList,
     return count, -moment.reshape(n, d, d) / volume[:, None, None]
 
 
-def _particle_data(sim: DEMSimulation, pairs: ContactList, walls: ContactList) -> _PolyData:
+def _particle_data(sim: DEMSimulation, coordination: npt.NDArray[np.int64],
+                   stress: npt.NDArray[np.float64]) -> _PolyData:
     """Collect the particles of the current state: their centres, and their data.
 
     Args:
         sim: the simulation.
-        pairs: contacts between particles.
-        walls: contacts between particles and facets.
+        coordination: number of contacts of every particle.
+        stress: mean stress tensor in every particle, positive in compression, shape (n, d, d) [Pa].
 
     Returns:
         The particles, as vertices.
     """
     n, d = sim.n, sim.dimension
-    coordination, stress = _particle_stress(sim, pairs, walls)
     tensor = np.zeros((n, 3, 3))
     tensor[:, :d, :d] = stress
     data: Dict[str, DataArray] = {
@@ -366,6 +377,7 @@ def _particle_data(sim: DEMSimulation, pairs: ContactList, walls: ContactList) -
         "coordination": coordination,
         "stress": tensor.reshape(n, 9),
         "mean_stress": np.trace(stress, axis1=1, axis2=2) / d,
+        "sphere": (~sim.polytope).astype(np.int64),
     }
     if sim.water is not None:
         data["porosity"] = sim.porosity
@@ -374,6 +386,49 @@ def _particle_data(sim: DEMSimulation, pairs: ContactList, walls: ContactList) -
             data["excess_pore_pressure"] = sim.excess_pore_pressure(sim.pos)
     index = np.arange(n, dtype=np.int64)
     return _PolyData(_in_space(sim.pos), "Verts", index, index + 1, data, {})
+
+
+def _shape_data(sim: DEMSimulation, coordination: npt.NDArray[np.int64], stress: npt.NDArray[np.float64]) -> _PolyData:
+    """Collect the shapes of the polygonal and polyhedral particles in space.
+
+    Args:
+        sim: the simulation.
+        coordination: number of contacts of every particle.
+        stress: mean stress tensor in every particle, positive in compression, shape (n, d, d) [Pa].
+
+    Returns:
+        The outline of every polygon, or every face of every polyhedron, as a polygon.
+    """
+    table = sim.shapes
+    rows, vertices = frame_polygons(table, sim.pos, sim.orientation)
+    if rows.size == 0:
+        none = np.zeros(0, dtype=np.int64)
+        return _PolyData(np.zeros((0, 3)), "Polys", none, none.copy(), {}, {})
+    if sim.dimension == 2:
+        owner = rows
+        counts = table.vertex_count[rows]
+        corners = vertices
+    else:
+        faces = table.faces[rows]
+        # padding faces have a zero normal, and every face is padded with copies of its last vertex
+        real = np.any(table.normals[rows] != 0.0, axis=2)
+        particle, face = np.nonzero(real)
+        owner = rows[particle]
+        loops = faces[particle, face]
+        counts = np.argmax(loops == loops[:, -1:], axis=1) + 1
+        corners = vertices[particle[:, None], loops]
+    used = np.arange(corners.shape[1])[None, :] < counts[:, None]
+    mean_stress = np.trace(stress, axis1=1, axis2=2) / sim.dimension
+    data: Dict[str, DataArray] = {
+        "particle": owner.astype(np.int64),
+        "velocity": _in_space(sim.vel[owner].reshape(-1, sim.dimension)),
+        "angular_velocity": _rotations_in_space(sim.omega[owner]),
+        "coordination": coordination[owner],
+        "mean_stress": mean_stress[owner],
+    }
+    points = corners[used].reshape(-1, sim.dimension)
+    return _PolyData(_in_space(points), "Polys", np.arange(points.shape[0], dtype=np.int64),
+                     np.cumsum(counts).astype(np.int64), {}, data)
 
 
 def _contact_data(sim: DEMSimulation, pairs: ContactList, walls: ContactList) -> _PolyData:

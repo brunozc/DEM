@@ -15,6 +15,7 @@ from numpy.testing import assert_allclose
 
 from DEMcookies import (DEMSimulation, Geometry, Geometry3D, GlobalSettings, Heaviside, LoadedPlaten,
                         MaterialProperties, Open, Particle, Particle3D, Wall, Water, generate_lattice_particles)
+from DEMcookies.shapes import ConvexPolygon, ConvexPolyhedron
 from DEMcookies.vtk_export import (OPEN_CODE, PARAVIEW_SCRIPT, PLATEN_CODE, SERIES, WALL_CODE, VTKWriter)
 
 MATERIAL = MaterialProperties(density=2500.0, youngs_modulus=5.0e6, poisson_ratio=0.25, restitution=0.1, friction=0.5)
@@ -303,3 +304,39 @@ class TestVTKWriter:
             assert piece["NumberOfPoints"] == "0"
         piece, _ = _last(tmp_path, "boundary")
         assert piece["NumberOfPolys"] == "6"
+
+
+class TestShapeExport:
+    """Tests of the export of polygonal and polyhedral particles."""
+
+    def test_polyhedra_are_written_as_their_faces(self, tmp_path: Path) -> None:
+        """Every face of every polyhedron must be a polygon of the shapes series, and spheres must be flagged."""
+        cube = ConvexPolyhedron.box(1.0, 1.0, 1.0)
+        particles = [Particle3D(0.03, 0.03, 0.05, 0.01, shape=cube), Particle3D(0.07, 0.03, 0.05, 0.01)]
+        sim = DEMSimulation(Geometry3D.box(0.1, 0.1, 0.1), MATERIAL, particles=particles)
+        VTKWriter(str(tmp_path)).write(sim)
+        piece, arrays = _last(tmp_path, "shapes")
+        assert piece["NumberOfPolys"] == "6"
+        assert_allclose(arrays["Polys/offsets"], np.arange(4, 25, 4))
+        assert_allclose(arrays["CellData/particle"], 0)
+        assert_allclose(arrays["Points/Points"].mean(axis=0), sim.pos[0], atol=1e-12)
+        _, particle_arrays = _last(tmp_path, "particles")
+        assert_allclose(particle_arrays["PointData/sphere"], [0, 1])
+
+    def test_polygons_are_written_in_the_plane(self, tmp_path: Path) -> None:
+        """A polygon must be one polygon of the shapes series, in the plane z = 0."""
+        square = ConvexPolygon.rectangle(1.0, 1.0)
+        sim = DEMSimulation(Geometry.rectangle(0.1, 0.1),
+                            MATERIAL,
+                            particles=[Particle(0.05, 0.03, 0.01, shape=square, angle=0.3)])
+        VTKWriter(str(tmp_path)).write(sim)
+        piece, arrays = _last(tmp_path, "shapes")
+        assert piece["NumberOfPolys"] == "1"
+        assert_allclose(arrays["Points/Points"][:, 2], 0.0)
+        assert_allclose(arrays["Polys/offsets"], [4])
+
+    def test_spheres_only_write_empty_shapes(self, tmp_path: Path) -> None:
+        """A simulation of spheres must write an empty shapes series."""
+        VTKWriter(str(tmp_path)).write(_resting_particle_3d())
+        piece, _ = _last(tmp_path, "shapes")
+        assert piece["NumberOfPoints"] == "0" and piece["NumberOfPolys"] == "0"
