@@ -47,6 +47,18 @@ carries on with its ParaView files, at the interval it is resumed with. Set ``OM
 share a node. A packing holds about 6600 grains. On one core,
 depositing it takes about half an hour and a load cycle at 5 Hz about four minutes, so 50 cycles take some three
 hours per case; the time per cycle grows in proportion to the period of the load.
+
+``--grains polyhedra``, given to every command, makes the grains irregular convex polyhedra instead of spheres, to
+see what the shape of the stones does to the results: eight stones, the hulls of fourteen random points on ellipsoids
+of the elongation and flakiness of ballast, each grain one of them in a random orientation. A polyhedron of radius R
+has the volume of the sphere of radius R, so the grading and the mass of the ballast stay the same, and the material
+is the same granite without the rolling resistance, which the shape of the stones replaces. Such a study writes to
+``output/ballast_3d_polyhedra``, and exports to ParaView every 20000 steps by default, about 0.11 s, since every export
+holds the faces of every stone: some 30 MB each, 2.7 GB per run of 50 cycles. Polyhedra take a time step half as long
+and far more work per contact: a full packing takes some 3 s per time step on one core, 31 h per load cycle at 5 Hz.
+``--device gpu`` measures the overlaps of the stones on a GPU instead, with CuPy, on which a laptop GPU takes 0.3 to
+0.45 s per step, 3 to 4.5 h per cycle; time the GPU of your machine with ``benchmark_polyhedra.py`` before planning a
+study. A checkpoint carries on on either device. ``ballast_cyclic_3d_shapes.py`` compares the two shapes.
 """
 
 import argparse
@@ -62,12 +74,16 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Type, TypeVar
 import numpy as np
 import numpy.typing as npt
 
-from DEMcookies import (BoundaryCondition, DEMSimulation, Frame, Geometry3D, LoadedPlaten, MaterialProperties, Open,
-                        RainSettings, Sinusoidal, TimeHistory, Wall, Water)
+from DEMcookies import (BoundaryCondition, ConvexPolyhedron, DEMSimulation, Frame, Geometry3D, LoadedPlaten,
+                        MaterialProperties, Open, RainSettings, Sinusoidal, TimeHistory, Wall, Water)
+from DEMcookies.backend import DEVICES
 from DEMcookies.plotting import render_animation, render_frame
 from DEMcookies.vtk_export import VTKWriter
 
 OUTPUT_DIR = os.path.join("output", "ballast_3d")
+# shapes of the grains, and the directory of the results of each
+GRAINS = ("spheres", "polyhedra")
+OUTPUT_DIRS = {"spheres": OUTPUT_DIR, "polyhedra": os.path.join("output", "ballast_3d_polyhedra")}
 
 # box: one sleeper spacing along the track (x) and height (y) [m]
 SLEEPER_SPACING = 0.6
@@ -98,6 +114,14 @@ MATERIAL = MaterialProperties(density=2650.0,
                               friction=0.7,
                               rolling_friction=0.3)
 RADIUS_RANGE = (0.015, 0.025)
+# the same granite for polyhedral stones, whose shape resists rolling by itself
+POLYHEDRAL_MATERIAL = dataclasses.replace(MATERIAL, rolling_friction=0.0)
+# polyhedral stones: the hulls of random points on ellipsoids whose semi-axes give the elongation and the flakiness of
+# each stone
+STONE_VERTICES = 14
+STONE_ASPECTS = ((1.0, 1.0, 1.0), (1.3, 1.0, 0.8), (1.2, 0.8, 1.0), (1.5, 1.0, 0.9), (1.1, 1.0, 0.7), (1.4, 0.9, 1.0),
+                 (1.2, 1.0, 1.0), (1.3, 0.85, 0.75))
+STONES = tuple(ConvexPolyhedron.random(STONE_VERTICES, seed=k, aspect=aspect) for k, aspect in enumerate(STONE_ASPECTS))
 
 PACKINGS = 5
 CASES = ("dry", "half", "saturated")
@@ -126,6 +150,8 @@ SAMPLES_PER_CYCLE = 40
 SNAPSHOT_CYCLES = (1, 10, 25, 50, 100, 200, 500, 1000)
 # time steps between two ParaView exports: about 0.024 s, eight per load cycle at 5 Hz; zero writes none
 SAVE_EVERY_N_STEPS = 2000
+# the same for polyhedral stones, whose exports hold the faces of every stone and whose time step is shorter
+POLYHEDRA_SAVE_EVERY_N_STEPS = 20000
 # frames of the animation per load cycle, and its frame rate
 ANIMATION_FRAMES_PER_CYCLE = 4
 ANIMATION_FPS = 20
@@ -257,13 +283,28 @@ def build_geometry() -> Geometry3D:
     return Geometry3D(vertices, faces, conditions)
 
 
-def build_simulation() -> DEMSimulation:
+def build_simulation(grains: str = "spheres", device: str = "cpu") -> DEMSimulation:
     """Define the empty box with the sleeper.
+
+    Args:
+        grains: shape of the grains, one of GRAINS.
+        device: device that measures the overlaps of polyhedra, "cpu" or "gpu".
 
     Returns:
         The simulation, with an empty box.
+
+    Raises:
+        ValueError: if the shape of the grains is unknown.
     """
-    return DEMSimulation(build_geometry(), MATERIAL, radius_range=RADIUS_RANGE)
+    if grains == "spheres":
+        return DEMSimulation(build_geometry(), MATERIAL, radius_range=RADIUS_RANGE, device=device)
+    if grains == "polyhedra":
+        return DEMSimulation(build_geometry(),
+                             POLYHEDRAL_MATERIAL,
+                             radius_range=RADIUS_RANGE,
+                             shapes=STONES,
+                             device=device)
+    raise ValueError(f"Unknown grains {grains!r}; expected one of {GRAINS}.")
 
 
 def sleeper_base(sim: DEMSimulation) -> float:
@@ -335,7 +376,11 @@ def paraview_writer(directory: str, save_every_n_steps: int) -> Optional[VTKWrit
     return VTKWriter(os.path.join(directory, "paraview"), save_every_n_steps)
 
 
-def deposit(packing: int, output_dir: str, save_every_n_steps: int = SAVE_EVERY_N_STEPS) -> str:
+def deposit(packing: int,
+            output_dir: str,
+            save_every_n_steps: int = SAVE_EVERY_N_STEPS,
+            grains: str = "spheres",
+            device: str = "cpu") -> str:
     """Deposit the ballast under the sleeper, seat the sleeper on it, fill the cribs and the shoulder, and store it.
 
     A packing that is already stored is left alone, so that a study can be resumed.
@@ -344,6 +389,8 @@ def deposit(packing: int, output_dir: str, save_every_n_steps: int = SAVE_EVERY_
         packing: index of the packing, which seeds the random positions of the grains.
         output_dir: directory of the results.
         save_every_n_steps: number of time steps between two ParaView exports of the deposition; zero writes none.
+        grains: shape of the grains, one of GRAINS.
+        device: device that measures the overlaps of polyhedra, "cpu" or "gpu".
 
     Returns:
         A summary of the packing.
@@ -357,7 +404,7 @@ def deposit(packing: int, output_dir: str, save_every_n_steps: int = SAVE_EVERY_
         return f"packing {packing}: already deposited in {path}"
     os.makedirs(directory, exist_ok=True)
     start = perf_counter()
-    sim = build_simulation()
+    sim = build_simulation(grains, device)
     paraview = paraview_writer(directory, save_every_n_steps)
     if paraview is not None:
         sim.add_observer(paraview)
@@ -570,6 +617,7 @@ def save_results(run: LoadRun, path: str, extra: Optional[Dict[str, npt.NDArray[
     arrays: Dict[str, Any] = {
         "case": np.array(run.case),
         "packing": np.array(run.packing),
+        "grains": np.array("polyhedra" if np.any(sim.polytope) else "spheres"),
         "amplitude": np.array(run.settings.amplitude),
         "frequency": np.array(run.settings.frequency),
         "coupled": np.array(run.settings.coupled),
@@ -634,7 +682,8 @@ def run_case(packing: int,
              cycles: int,
              output_dir: str,
              animate: bool,
-             save_every_n_steps: int = SAVE_EVERY_N_STEPS) -> str:
+             save_every_n_steps: int = SAVE_EVERY_N_STEPS,
+             device: str = "cpu") -> str:
     """Load a deposited packing cyclically in one case, resuming from its checkpoint if there is one.
 
     Args:
@@ -645,6 +694,7 @@ def run_case(packing: int,
         output_dir: directory of the results.
         animate: whether an animation of a section at the rail seat is written as well.
         save_every_n_steps: number of time steps between two ParaView exports; zero writes none.
+        device: device that measures the overlaps of polyhedra, "cpu" or "gpu", whatever the run was checkpointed on.
 
     Returns:
         A summary of the run.
@@ -657,6 +707,7 @@ def run_case(packing: int,
     checkpoint = os.path.join(directory, "checkpoint.pkl")
     if os.path.exists(checkpoint):
         run = load_pickle(checkpoint, LoadRun)
+        run.sim.device = device
         if run.settings != settings:
             raise ValueError(f"The checkpoint {checkpoint} was made with {run.settings}, not {settings}; remove it, or "
                              f"choose another output directory, to start the run again.")
@@ -667,8 +718,9 @@ def run_case(packing: int,
         if not os.path.exists(source):
             raise FileNotFoundError(f"Packing {packing} has not been deposited: {source} does not exist.")
         os.makedirs(directory, exist_ok=True)
-        run = start_run(load_pickle(source, DEMSimulation), case, packing, settings,
-                        paraview_writer(directory, save_every_n_steps))
+        deposited = load_pickle(source, DEMSimulation)
+        deposited.device = device
+        run = start_run(deposited, case, packing, settings, paraview_writer(directory, save_every_n_steps))
         save_pickle(run, checkpoint)
 
     sim = run.sim
@@ -725,7 +777,9 @@ def run_all(packings: int,
             output_dir: str,
             workers: int,
             animate: bool,
-            save_every_n_steps: int = SAVE_EVERY_N_STEPS) -> None:
+            save_every_n_steps: int = SAVE_EVERY_N_STEPS,
+            grains: str = "spheres",
+            device: str = "cpu") -> None:
     """Deposit every packing and load it in every case, in parallel processes on one machine.
 
     Args:
@@ -736,16 +790,32 @@ def run_all(packings: int,
         workers: number of parallel processes.
         animate: whether the first packing of every case is animated as well.
         save_every_n_steps: number of time steps between two ParaView exports; zero writes none.
+        grains: shape of the grains, one of GRAINS.
+        device: device that measures the overlaps of polyhedra, "cpu" or "gpu".
     """
     with ProcessPoolExecutor(max_workers=workers) as pool:
-        for summary in pool.map(deposit, range(packings), [output_dir] * packings, [save_every_n_steps] * packings):
+        for summary in pool.map(deposit, range(packings), [output_dir] * packings, [save_every_n_steps] * packings,
+                                [grains] * packings, [device] * packings):
             print(summary, flush=True)
         runs = [
             pool.submit(run_case, packing, case, settings, cycles, output_dir, animate and packing == 0,
-                        save_every_n_steps) for packing in range(packings) for case in CASES
+                        save_every_n_steps, device) for packing in range(packings) for case in CASES
         ]
         for run in runs:
             print(run.result(), flush=True)
+
+
+def resolve_grains(arguments: argparse.Namespace) -> None:
+    """Fill in the output directory and the ParaView interval that the shape of the grains implies, if not given.
+
+    Args:
+        arguments: parsed arguments, with ``grains``, ``output_dir`` and ``save_every_n_steps``; changed in place.
+    """
+    if arguments.output_dir is None:
+        arguments.output_dir = OUTPUT_DIRS[arguments.grains]
+    if arguments.save_every_n_steps is None:
+        polyhedra = arguments.grains == "polyhedra"
+        arguments.save_every_n_steps = POLYHEDRA_SAVE_EVERY_N_STEPS if polyhedra else SAVE_EVERY_N_STEPS
 
 
 def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -760,11 +830,21 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--output-dir", default=OUTPUT_DIR, help=f"directory of the results (default {OUTPUT_DIR})")
+    common.add_argument("--grains",
+                        choices=GRAINS,
+                        default="spheres",
+                        help="shape of the grains, which also sets the default output directory (default spheres)")
+    common.add_argument("--output-dir",
+                        help=f"directory of the results (default {OUTPUT_DIRS['spheres']}, or "
+                        f"{OUTPUT_DIRS['polyhedra']} for polyhedra)")
+    common.add_argument("--device",
+                        choices=DEVICES,
+                        default="cpu",
+                        help="device that measures the overlaps of polyhedra; gpu needs CuPy (default cpu)")
     common.add_argument("--save-every-n-steps",
                         type=int,
-                        default=SAVE_EVERY_N_STEPS,
-                        help=f"time steps between two ParaView exports, 0 for none (default {SAVE_EVERY_N_STEPS})")
+                        help=f"time steps between two ParaView exports, 0 for none (default {SAVE_EVERY_N_STEPS}, or "
+                        f"{POLYHEDRA_SAVE_EVERY_N_STEPS} for polyhedra)")
     loading = argparse.ArgumentParser(add_help=False)
     loading.add_argument("--amplitude",
                          type=float,
@@ -808,6 +888,7 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                             help="number of parallel processes (default: one per core)")
 
     arguments = parser.parse_args(argv)
+    resolve_grains(arguments)
     if arguments.save_every_n_steps < 0:
         parser.error(f"--save-every-n-steps must be non-negative, got {arguments.save_every_n_steps}.")
     if arguments.command in ("deposit", "load") and arguments.task is not None:
@@ -835,16 +916,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     """
     arguments = parse_arguments(argv)
     if arguments.command == "deposit":
-        print(deposit(arguments.packing, arguments.output_dir, arguments.save_every_n_steps), flush=True)
+        print(deposit(arguments.packing, arguments.output_dir, arguments.save_every_n_steps, arguments.grains,
+                      arguments.device),
+              flush=True)
         return
     settings = LoadSettings(arguments.amplitude * 1e3, arguments.frequency, arguments.coupled)
     if arguments.command == "load":
         print(
             run_case(arguments.packing, arguments.case, settings, arguments.cycles, arguments.output_dir,
-                     arguments.animate, arguments.save_every_n_steps))
+                     arguments.animate, arguments.save_every_n_steps, arguments.device))
         return
     run_all(arguments.packings, settings, arguments.cycles, arguments.output_dir, arguments.workers, arguments.animate,
-            arguments.save_every_n_steps)
+            arguments.save_every_n_steps, arguments.grains, arguments.device)
 
 
 if __name__ == "__main__":

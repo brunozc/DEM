@@ -46,6 +46,11 @@ own records to ``packing_<k>/preload/history.npz``, out of the way of the post-p
 
 A preload of 50 cycles takes about five hours on one core, and a case about five and a half, so the whole study takes
 some eleven hours on a cluster that runs the five preloads and then the fifteen cases in parallel.
+
+``--grains polyhedra``, given to every command, runs the study on the polyhedral stones that
+``ballast_cyclic_3d.py --grains polyhedra`` deposits: it reads them from ``output/ballast_3d_polyhedra`` and writes to
+``output/ballast_3d_polyhedra_preloaded``. The stored packings carry their grains, so nothing else changes. A
+polyhedral cycle costs as much as in ``ballast_cyclic_3d.py``, so pass ``--device gpu`` here too.
 """
 
 import argparse
@@ -60,16 +65,21 @@ from typing import Any, Dict, Optional, Sequence
 import numpy as np
 import numpy.typing as npt
 
-from ballast_cyclic_3d import (AMPLITUDE, CASES, CYCLES, FREQUENCY, PACKINGS, RAIL_SEAT, REST_TIME, SAMPLES_PER_CYCLE,
-                               SAVE_EVERY_N_STEPS, SNAPSHOT_CYCLES, LoadRun, LoadSettings, case_dir, load_pickle,
-                               packing_dir, paraview_writer, per_cycle, pressure_points, record_sample, resume_paraview,
-                               save_pickle, save_results, sleeper_base, sleeper_uplift, start_run, water_level)
+from ballast_cyclic_3d import (AMPLITUDE, CASES, CYCLES, FREQUENCY, GRAINS, PACKINGS, POLYHEDRA_SAVE_EVERY_N_STEPS,
+                               RAIL_SEAT, REST_TIME, SAMPLES_PER_CYCLE, SAVE_EVERY_N_STEPS, SNAPSHOT_CYCLES, LoadRun,
+                               LoadSettings, case_dir, load_pickle, packing_dir, paraview_writer, per_cycle,
+                               pressure_points, record_sample, resume_paraview, save_pickle, save_results, sleeper_base,
+                               sleeper_uplift, start_run, water_level)
 from ballast_cyclic_3d import OUTPUT_DIR as DEPOSIT_DIR
+from ballast_cyclic_3d import OUTPUT_DIRS as DEPOSIT_DIRS
 from DEMcookies import DEMSimulation, Water
+from DEMcookies.backend import DEVICES
 from DEMcookies.plotting import render_frame
 from DEMcookies.vtk_export import VTKWriter
 
 OUTPUT_DIR = os.path.join("output", "ballast_3d_preloaded")
+# directory of the results for each shape of the grains
+OUTPUT_DIRS = {"spheres": OUTPUT_DIR, "polyhedra": os.path.join("output", "ballast_3d_polyhedra_preloaded")}
 
 # cycles of the dry preload: the first cycle sets most of the bedding-in, and by the 50th the rate of settlement has
 # dropped tenfold in ballast_cyclic_3d.py
@@ -234,7 +244,8 @@ def preload(packing: int,
             cycles: int,
             deposit_dir: str,
             output_dir: str,
-            save_every_n_steps: int = SAVE_EVERY_N_STEPS) -> str:
+            save_every_n_steps: int = SAVE_EVERY_N_STEPS,
+            device: str = "cpu") -> str:
     """Load a deposited packing dry for a number of cycles, resuming from its checkpoint, and store the bed.
 
     A packing that is already preloaded is left alone, so that a study can be resumed.
@@ -246,6 +257,7 @@ def preload(packing: int,
         deposit_dir: directory of the results of ``ballast_cyclic_3d.py``, which holds the deposited packings.
         output_dir: directory of the results of this study.
         save_every_n_steps: number of time steps between two ParaView exports; zero writes none.
+        device: device that measures the overlaps of polyhedra, "cpu" or "gpu".
 
     Returns:
         A summary of the preload.
@@ -262,6 +274,7 @@ def preload(packing: int,
     checkpoint = os.path.join(directory, "checkpoint.pkl")
     if os.path.exists(checkpoint):
         run = load_pickle(checkpoint, StagedRun)
+        run.load.sim.device = device
         check_preload(run, settings, cycles, checkpoint)
         resume_paraview(run.load, directory, save_every_n_steps)
         print(f"packing {packing}, preload: resumed after cycle {run.load.cycles_done}", flush=True)
@@ -271,8 +284,10 @@ def preload(packing: int,
             raise FileNotFoundError(f"Packing {packing} has not been deposited: {source} does not exist; run "
                                     f"examples/ballast_cyclic_3d.py deposit first.")
         os.makedirs(directory, exist_ok=True)
+        deposited = load_pickle(source, DEMSimulation)
+        deposited.device = device
         # the dry case of ballast_cyclic_3d.py, so the preload repeats the first cycles of that run
-        load = start_run(load_pickle(source, DEMSimulation), "dry", packing, preload_settings(settings),
+        load = start_run(deposited, "dry", packing, preload_settings(settings),
                          paraview_writer(directory, save_every_n_steps))
         run = StagedRun(load, cycles)
         save_pickle(run, checkpoint)
@@ -345,7 +360,8 @@ def run_case(packing: int,
              preload_cycles: int,
              cycles: int,
              output_dir: str,
-             save_every_n_steps: int = SAVE_EVERY_N_STEPS) -> str:
+             save_every_n_steps: int = SAVE_EVERY_N_STEPS,
+             device: str = "cpu") -> str:
     """Flood a preloaded packing in one case and load it again, resuming from its checkpoint if there is one.
 
     Args:
@@ -356,6 +372,7 @@ def run_case(packing: int,
         cycles: number of load cycles after the flooding.
         output_dir: directory of the results.
         save_every_n_steps: number of time steps between two ParaView exports; zero writes none.
+        device: device that measures the overlaps of polyhedra, "cpu" or "gpu".
 
     Returns:
         A summary of the run.
@@ -370,6 +387,7 @@ def run_case(packing: int,
     label = f"packing {packing}, {case}"
     if os.path.exists(checkpoint):
         run = load_pickle(checkpoint, StagedRun)
+        run.load.sim.device = device
         if run.load.settings != settings or run.preload_cycles != preload_cycles:
             raise ValueError(f"The checkpoint {checkpoint} was made with {run.load.settings} after a preload of "
                              f"{run.preload_cycles} cycles, not with {settings} after {preload_cycles}; remove it, or "
@@ -381,6 +399,7 @@ def run_case(packing: int,
         if not os.path.exists(source):
             raise FileNotFoundError(f"Packing {packing} has not been preloaded: {source} does not exist.")
         preloaded = load_pickle(source, StagedRun)
+        preloaded.load.sim.device = device
         check_preload(preloaded, settings, preload_cycles, source)
         os.makedirs(directory, exist_ok=True)
         run = flood(preloaded, case, settings, paraview_writer(directory, save_every_n_steps))
@@ -418,7 +437,8 @@ def run_all(packings: int,
             deposit_dir: str,
             output_dir: str,
             workers: int,
-            save_every_n_steps: int = SAVE_EVERY_N_STEPS) -> None:
+            save_every_n_steps: int = SAVE_EVERY_N_STEPS,
+            device: str = "cpu") -> None:
     """Preload every packing and load it in every case, in parallel processes on one machine.
 
     Args:
@@ -430,17 +450,18 @@ def run_all(packings: int,
         output_dir: directory of the results of this study.
         workers: number of parallel processes.
         save_every_n_steps: number of time steps between two ParaView exports; zero writes none.
+        device: device that measures the overlaps of polyhedra, "cpu" or "gpu".
     """
     with ProcessPoolExecutor(max_workers=workers) as pool:
         preloads = [
-            pool.submit(preload, packing, settings, preload_cycles, deposit_dir, output_dir, save_every_n_steps)
+            pool.submit(preload, packing, settings, preload_cycles, deposit_dir, output_dir, save_every_n_steps, device)
             for packing in range(packings)
         ]
         for job in preloads:
             print(job.result(), flush=True)
         runs = [
-            pool.submit(run_case, packing, case, settings, preload_cycles, cycles, output_dir, save_every_n_steps)
-            for packing in range(packings) for case in CASES
+            pool.submit(run_case, packing, case, settings, preload_cycles, cycles, output_dir, save_every_n_steps,
+                        device) for packing in range(packings) for case in CASES
         ]
         for job in runs:
             print(job.result(), flush=True)
@@ -458,11 +479,22 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--output-dir", default=OUTPUT_DIR, help=f"directory of the results (default {OUTPUT_DIR})")
+    common.add_argument("--grains",
+                        choices=GRAINS,
+                        default="spheres",
+                        help="shape of the grains of the deposits, which sets the default directories (default "
+                        "spheres)")
+    common.add_argument("--output-dir",
+                        help=f"directory of the results (default {OUTPUT_DIRS['spheres']}, or "
+                        f"{OUTPUT_DIRS['polyhedra']} for polyhedra)")
+    common.add_argument("--device",
+                        choices=DEVICES,
+                        default="cpu",
+                        help="device that measures the overlaps of polyhedra; gpu needs CuPy (default cpu)")
     common.add_argument("--save-every-n-steps",
                         type=int,
-                        default=SAVE_EVERY_N_STEPS,
-                        help=f"time steps between two ParaView exports, 0 for none (default {SAVE_EVERY_N_STEPS})")
+                        help=f"time steps between two ParaView exports, 0 for none (default {SAVE_EVERY_N_STEPS}, or "
+                        f"{POLYHEDRA_SAVE_EVERY_N_STEPS} for polyhedra)")
     common.add_argument("--amplitude",
                         type=float,
                         default=AMPLITUDE / 1e3,
@@ -478,9 +510,8 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                         help=f"number of dry load cycles before the flooding (default {PRELOAD_CYCLES})")
     deposits = argparse.ArgumentParser(add_help=False)
     deposits.add_argument("--deposit-dir",
-                          default=DEPOSIT_DIR,
                           help=f"directory of the results of ballast_cyclic_3d.py, with the deposited packings "
-                          f"(default {DEPOSIT_DIR})")
+                          f"(default {DEPOSIT_DIR}, or {DEPOSIT_DIRS['polyhedra']} for polyhedra)")
     flooding = argparse.ArgumentParser(add_help=False)
     flooding.add_argument("--cycles",
                           type=int,
@@ -519,6 +550,13 @@ def parse_arguments(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
                             help="number of parallel processes (default: one per core)")
 
     arguments = parser.parse_args(argv)
+    if arguments.output_dir is None:
+        arguments.output_dir = OUTPUT_DIRS[arguments.grains]
+    if arguments.save_every_n_steps is None:
+        polyhedra = arguments.grains == "polyhedra"
+        arguments.save_every_n_steps = POLYHEDRA_SAVE_EVERY_N_STEPS if polyhedra else SAVE_EVERY_N_STEPS
+    if getattr(arguments, "deposit_dir", "") is None:
+        arguments.deposit_dir = DEPOSIT_DIRS[arguments.grains]
     if arguments.save_every_n_steps < 0:
         parser.error(f"--save-every-n-steps must be non-negative, got {arguments.save_every_n_steps}.")
     if arguments.preload_cycles < 1:
@@ -550,16 +588,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     settings = LoadSettings(arguments.amplitude * 1e3, arguments.frequency, getattr(arguments, "coupled", False))
     if arguments.command == "preload":
         print(preload(arguments.packing, settings, arguments.preload_cycles, arguments.deposit_dir,
-                      arguments.output_dir, arguments.save_every_n_steps),
+                      arguments.output_dir, arguments.save_every_n_steps, arguments.device),
               flush=True)
         return
     if arguments.command == "load":
         print(
             run_case(arguments.packing, arguments.case, settings, arguments.preload_cycles, arguments.cycles,
-                     arguments.output_dir, arguments.save_every_n_steps))
+                     arguments.output_dir, arguments.save_every_n_steps, arguments.device))
         return
     run_all(arguments.packings, settings, arguments.preload_cycles, arguments.cycles, arguments.deposit_dir,
-            arguments.output_dir, arguments.workers, arguments.save_every_n_steps)
+            arguments.output_dir, arguments.workers, arguments.save_every_n_steps, arguments.device)
 
 
 if __name__ == "__main__":
