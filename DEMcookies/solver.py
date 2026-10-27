@@ -14,6 +14,7 @@ sphere. The neighbour list works on the spheres that bound the particles.
 
 import math
 from dataclasses import dataclass, field
+from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -23,6 +24,7 @@ from .boundary import Open, Platen
 from .contact import (ContactForces, HertzMindlinModel, MaterialProperties, RollingMoments, overlap_contact_radius,
                       rayleigh_time_step)
 from .facets import FacetSet
+from .backend import check_device, gpu_module, to_device, to_host
 from .geometry3d import Domain
 from .water import PoreWater, Water, evaluate_at
 from .globals import COPLANAR_TOLERANCE, ESCAPE_CHECK_INTERVAL, GEOMETRY_TOLERANCE, GlobalSettings
@@ -316,7 +318,8 @@ class DEMSimulation:
                  settings: Optional[GlobalSettings] = None,
                  dt: Optional[float] = None,
                  water: Optional[Water] = None,
-                 shapes: Optional[Sequence[Optional[Shape]]] = None) -> None:
+                 shapes: Optional[Sequence[Optional[Shape]]] = None,
+                 device: str = "cpu") -> None:
         """Set up the simulation.
 
         Args:
@@ -334,6 +337,8 @@ class DEMSimulation:
             shapes: shapes of the rained particles, polygons in 2D and polyhedra in 3D: each particle takes one at
                 random, in a random orientation, scaled to its radius; None in the list stands for a sphere. None
                 rains spheres only.
+            device: device that measures the overlaps of polygonal and polyhedral particles, "cpu" or "gpu" (see
+                ``device``).
 
         Raises:
             ValueError: if a particle has a different number of dimensions than the geometry.
@@ -347,7 +352,13 @@ class DEMSimulation:
             ValueError: if a particle centre lies outside the domain.
             ValueError: if the time step is not positive.
             ValueError: if the time step is too large to resolve the drag of the water on the smallest particle.
+            ValueError: if the device is neither "cpu" nor "gpu".
+            RuntimeError: if the device is "gpu" and CuPy is not installed or finds no GPU.
         """
+        self.__device = "cpu"
+        self.__device_table: Optional[PolytopeTable] = None
+        self.__device_source: Optional[PolytopeTable] = None
+        self.device = device
         self.geometry = geometry
         self.material = material
         self.settings = settings or GlobalSettings()
@@ -430,6 +441,36 @@ class DEMSimulation:
     def n(self) -> int:
         """Number of particles in the simulation."""
         return int(self.radius.size)
+
+    @property
+    def device(self) -> str:
+        """Device that measures the overlaps of the polygonal and polyhedral particles: "cpu" or "gpu".
+
+        Those overlaps are most of the work of a simulation with shaped particles, and a GPU measures them many times
+        faster, with CuPy; everything else is computed on the CPU in either case, and spheres are not affected. The
+        device can be changed at any time, e.g. to carry on on a CPU with a simulation pickled on a machine with a
+        GPU; a pickled simulation holds nothing in the memory of a GPU.
+        """
+        return self.__device
+
+    @device.setter
+    def device(self, device: str) -> None:
+        """Change the device.
+
+        Args:
+            device: "cpu" or "gpu".
+
+        Raises:
+            ValueError: if the device is neither "cpu" nor "gpu".
+            RuntimeError: if the device is "gpu" and CuPy is not installed or finds no GPU.
+        """
+        check_device(device)
+        if device == "gpu":
+            gpu_module()
+        self.__device = device
+        self.__device_table = None
+        self.__device_source = None
+        self.__pose = None
 
     @property
     def bounding_radius(self) -> npt.NDArray[np.float64]:
@@ -520,6 +561,17 @@ class DEMSimulation:
             body_of_facet[int(index)] = int(platen)
         return facet_regions(self.geometry, [int(index) for index in self.__solid_index], body_of_facet)
 
+    def __getstate__(self) -> Dict[str, Any]:
+        """Return the attributes to pickle: all but those in the memory of a GPU, which are made again when needed.
+
+        Returns:
+            The attributes.
+        """
+        state = dict(self.__dict__)
+        for name in ("_DEMSimulation__device_table", "_DEMSimulation__device_source", "_DEMSimulation__pose"):
+            state[name] = None
+        return state
+
     def __setstate__(self, state: Dict[str, Any]) -> None:
         """Restore a pickled simulation, also one pickled before particles could have shapes, e.g. a checkpoint.
 
@@ -527,6 +579,10 @@ class DEMSimulation:
             state: attributes of the pickled simulation.
         """
         self.__dict__.update(state)
+        # a simulation from before the device existed measured its overlaps on the CPU
+        self.__dict__.setdefault("_DEMSimulation__device", "cpu")
+        self.__dict__.setdefault("_DEMSimulation__device_table", None)
+        self.__dict__.setdefault("_DEMSimulation__device_source", None)
         if "_DEMSimulation__table" in state:
             return
         # a simulation of spheres from before shapes existed carries on as one of spheres of today
@@ -926,30 +982,50 @@ class DEMSimulation:
         """
         pose = self.__pose
         assert pose is not None
-        body = np.einsum("kji,kj->ki", pose.rotation[self.__pose_index[particles]], axes)
+        rotation = to_host(pose.rotation[self.__on_device(self.__pose_index[particles])])
+        body = np.einsum("kji,kj->ki", rotation, axes)
         return np.asarray(np.einsum("ki,ki->k", self.inertia[particles], body * body))
 
+    def __on_device(self, array: npt.NDArray[Any]) -> Any:
+        """Return an array in the memory of the device that measures the overlaps of the polytopes."""
+        return to_device(array, self.__array_module())
+
+    def __array_module(self) -> ModuleType:
+        """Return the array module of the device that measures the overlaps of the polytopes."""
+        return gpu_module() if self.__device == "gpu" else np
+
+    def __device_shapes(self) -> PolytopeTable:
+        """Return the table of shapes in the memory of the device, copied there once for every new table."""
+        if self.__device == "cpu":
+            return self.__table
+        if self.__device_table is None or self.__device_source is not self.__table:
+            self.__device_table = self.__table.to_device(gpu_module())
+            self.__device_source = self.__table
+        return self.__device_table
+
     def __place_polytopes(self) -> None:
-        """Move the shapes of the polytope particles to their current position and orientation."""
+        """Move the shapes of the polytope particles to their current position and orientation, on the device."""
         rows = np.flatnonzero(self.polytope)
         self.__pose_index = np.full(self.n, -1, dtype=np.int64)
         self.__pose_index[rows] = np.arange(rows.size)
-        self.__pose = place(self.__table, rows, self.pos, self.orientation) if rows.size else None
+        self.__pose = None
+        if rows.size:
+            self.__pose = place(self.__device_shapes(), self.__on_device(rows), self.__on_device(self.pos),
+                                self.__on_device(self.orientation))
 
-    def __placed(
-        self, particles: npt.NDArray[np.int64]
-    ) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    def __placed(self, particles: npt.NDArray[np.int64]) -> Tuple[Any, Any, Any]:
         """Return the vertices, face normals and face offsets of polytope particles at their current pose.
 
         Args:
             particles: indices of polytope particles.
 
         Returns:
-            Their vertices, shape (k, v, d) [m], face normals, shape (k, f, d), and face offsets, shape (k, f) [m].
+            Their vertices, shape (k, v, d) [m], face normals, shape (k, f, d), and face offsets, shape (k, f) [m],
+            on the device.
         """
         pose = self.__pose
         assert pose is not None
-        index = self.__pose_index[particles]
+        index = self.__on_device(self.__pose_index[particles])
         return pose.vertices[index], pose.normals[index], pose.offsets[index]
 
     def __polyhedra(self, particles: npt.NDArray[np.int64]) -> Polyhedra:
@@ -959,12 +1035,12 @@ class DEMSimulation:
             particles: indices of polyhedral particles.
 
         Returns:
-            The polyhedra.
+            The polyhedra, on the device.
         """
         vertices, normals, offsets = self.__placed(particles)
-        table = self.__table
-        return Polyhedra(vertices, normals, offsets, table.edges[particles], table.edge_faces[particles],
-                         table.faces[particles])
+        table = self.__device_shapes()
+        rows = self.__on_device(particles)
+        return Polyhedra(vertices, normals, offsets, table.edges[rows], table.edge_faces[rows], table.faces[rows])
 
     def __polytope_overlap(self, first: npt.NDArray[np.int64], second: npt.NDArray[np.int64]) -> Overlap:
         """Return the overlaps of pairs of polytope particles.
@@ -974,11 +1050,28 @@ class DEMSimulation:
             second: particle j of each pair.
 
         Returns:
-            The overlaps, with the contact surface pointing from j towards i.
+            The overlaps, with the contact surface pointing from j towards i, in the memory of the CPU.
         """
         if self.dimension == 2:
-            return polygon_overlap(*self.__placed(first), *self.__placed(second))
-        return polyhedron_overlap(self.__polyhedra(first), self.__polyhedra(second))
+            return _on_host(polygon_overlap(*self.__placed(first), *self.__placed(second)))
+        return _on_host(polyhedron_overlap(self.__polyhedra(first), self.__polyhedra(second)))
+
+    def __region_overlap(self, particles: npt.NDArray[np.int64], normals: npt.NDArray[np.float64],
+                         offsets: npt.NDArray[np.float64]) -> Overlap:
+        """Return the overlaps of polytope particles with regions of solid behind the facets.
+
+        Args:
+            particles: polytope of each region.
+            normals: outward unit normals of the half-spaces of each region, shape (k, r, d).
+            offsets: offsets of those half-spaces, shape (k, r) [m].
+
+        Returns:
+            The overlaps, with the contact surface on the plane of the facet, in the memory of the CPU.
+        """
+        normals, offsets = self.__on_device(normals), self.__on_device(offsets)
+        if self.dimension == 2:
+            return _on_host(polygon_region_overlap(*self.__placed(particles), normals, offsets))
+        return _on_host(polyhedron_region_overlap(self.__polyhedra(particles), normals, offsets))
 
     def __distance_to_polytopes(
             self, points: npt.NDArray[np.float64],
@@ -991,11 +1084,14 @@ class DEMSimulation:
 
         Returns:
             The distances, negative inside [m], and the unit normals at the closest points of the particles,
-            pointing towards the points.
+            pointing towards the points, in the memory of the CPU.
         """
+        on_device = self.__on_device(points)
         if self.dimension == 2:
-            return polygon_distance(points, *self.__placed(particles))
-        return polyhedron_distance(points, self.__polyhedra(particles))
+            distance, normal = polygon_distance(on_device, *self.__placed(particles))
+        else:
+            distance, normal = polyhedron_distance(on_device, self.__polyhedra(particles))
+        return to_host(distance), to_host(normal)
 
     def __solid_state(self) -> Tuple[FacetSet, npt.NDArray[np.float64]]:
         """Return the solid facets at their current position and their velocities, shape (facets, d) [m/s]."""
@@ -1172,10 +1268,7 @@ class DEMSimulation:
         region = np.repeat(regions.start[facet], counts) + np.arange(owner.size) - np.repeat(
             np.cumsum(counts) - counts, counts)
         rows = particle[owner]
-        if self.dimension == 2:
-            overlap = polygon_region_overlap(*self.__placed(rows), regions.normals[region], offsets[region])
-        else:
-            overlap = polyhedron_region_overlap(self.__polyhedra(rows), regions.normals[region], offsets[region])
+        overlap = self.__region_overlap(rows, regions.normals[region], offsets[region])
         measure = np.bincount(owner, overlap.measure, particle.size)
         first = scatter_add(owner, overlap.measure[:, None] * overlap.centroid, particle.size)
         size = np.bincount(owner, np.einsum("ij,ij->i", overlap.surface, regions.normals[region, 0]), particle.size)
@@ -1673,6 +1766,11 @@ class DEMSimulation:
 
 
 _DIMENSION_NAMES = {2: "two-dimensional", 3: "three-dimensional"}
+
+
+def _on_host(overlap: Overlap) -> Overlap:
+    """Return overlaps in the memory of the CPU, copied from the GPU if they were measured there."""
+    return Overlap(to_host(overlap.measure), to_host(overlap.centroid), to_host(overlap.surface))
 
 
 def _coplanar_totals(particle: npt.NDArray[np.int64], normal: npt.NDArray[np.float64], plane: npt.NDArray[np.float64],

@@ -10,6 +10,8 @@ from typing import Tuple
 import numpy as np
 import numpy.typing as npt
 
+from .backend import array_module
+
 
 def norm(vectors: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """Length of each vector along the last axis.
@@ -46,13 +48,13 @@ def cross_3d(a: npt.NDArray[np.float64], b: npt.NDArray[np.float64]) -> npt.NDAr
     It spells the components out, which is much faster than ``numpy.cross`` on the small arrays of a contact batch.
 
     Args:
-        a: first vectors, shape (..., 3).
+        a: first vectors, NumPy or CuPy, shape (..., 3).
         b: second vectors, shape (..., 3).
 
     Returns:
-        The cross products a x b, of the broadcast shape.
+        The cross products a x b, of the broadcast shape, on the device of the vectors.
     """
-    out = np.empty(np.broadcast_shapes(a.shape, b.shape))
+    out = array_module(a, b).empty(np.broadcast_shapes(a.shape, b.shape))
     out[..., 0] = a[..., 1] * b[..., 2] - a[..., 2] * b[..., 1]
     out[..., 1] = a[..., 2] * b[..., 0] - a[..., 0] * b[..., 2]
     out[..., 2] = a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]
@@ -94,15 +96,16 @@ def scatter_add(index: npt.NDArray[np.int64], values: npt.NDArray[np.float64], s
 
     Args:
         index: bin of each value, shape (k,).
-        values: scalars, shape (k,), or vectors, shape (k, d).
+        values: scalars, shape (k,), or vectors, shape (k, d), NumPy or CuPy.
         size: number of bins.
 
     Returns:
-        The sum in each bin, shape (size,) or (size, d).
+        The sum in each bin, shape (size,) or (size, d), on the device of the values.
     """
+    xp = array_module(values)
     if values.ndim == 1:
-        return np.asarray(np.bincount(index, values, size), dtype=np.float64)
-    return np.column_stack([np.bincount(index, values[:, k], size) for k in range(values.shape[1])]).reshape(size, -1)
+        return xp.asarray(xp.bincount(index, values, size), dtype=np.float64)
+    return xp.column_stack([xp.bincount(index, values[:, k], size) for k in range(values.shape[1])]).reshape(size, -1)
 
 
 def rotation_shape(count: int, dimension: int) -> Tuple[int, ...]:

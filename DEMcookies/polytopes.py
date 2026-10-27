@@ -9,11 +9,13 @@ the body frame into the space frame: a point at r in the body frame is at x + R 
 
 import math
 from dataclasses import dataclass
+from types import ModuleType
 from typing import Optional, Sequence, Tuple
 
 import numpy as np
 import numpy.typing as npt
 
+from .backend import array_module
 from .globals import SPHERE_INERTIA_FACTOR
 from .shapes import ConvexPolyhedron, Shape
 from .vectors import cross_3d
@@ -43,6 +45,11 @@ def _pad(array: npt.NDArray, width: int, axis: int, mode: str, value: float = 0.
         index = 0 if mode == "first" else -1
         filler = np.repeat(np.take(array, [index], axis=axis), missing, axis=axis)
     return np.concatenate((array, filler), axis=axis)
+
+
+# arrays of a PolytopeTable, in the order of its fields after the dimension
+_ARRAYS = ("vertex_count", "vertices", "normals", "offsets", "edges", "edge_faces", "faces", "inertia_factor", "reach",
+           "inradius")
 
 
 @dataclass(frozen=True, eq=False)
@@ -166,6 +173,19 @@ class PolytopeTable:
                              np.concatenate([p.inertia_factor for p in parts]),
                              np.concatenate([p.reach for p in parts]), np.concatenate([p.inradius for p in parts]))
 
+    def to_device(self, xp: ModuleType) -> "PolytopeTable":
+        """Return the table in the memory of the device of an array module.
+
+        Args:
+            xp: array module of the device, ``numpy`` or ``cupy``.
+
+        Returns:
+            The table, with its arrays copied to the GPU for ``cupy``; this table itself for ``numpy``.
+        """
+        if xp is np:
+            return self
+        return PolytopeTable(self.dimension, *(xp.asarray(getattr(self, name)) for name in _ARRAYS))
+
     def take(self, keep: npt.NDArray[np.bool_]) -> "PolytopeTable":
         """Return the table of a subset of the particles.
 
@@ -201,7 +221,7 @@ class PolytopePose:
 
 def place(table: PolytopeTable, rows: npt.NDArray[np.int64], positions: npt.NDArray[np.float64],
           orientations: npt.NDArray[np.float64]) -> PolytopePose:
-    """Move the shapes of some particles into the space frame.
+    """Move the shapes of some particles into the space frame, on the device of the table, which all arrays share.
 
     Args:
         table: shapes of all the particles.
@@ -212,12 +232,13 @@ def place(table: PolytopeTable, rows: npt.NDArray[np.int64], positions: npt.NDAr
     Returns:
         The placed shapes.
     """
+    xp = array_module(table.vertices)
     rotation = rotation_matrices(orientations[rows])
     centre = positions[rows]
-    vertices = np.einsum("pij,pvj->pvi", rotation, table.vertices[rows]) + centre[:, None, :]
-    normals = np.einsum("pij,pfj->pfi", rotation, table.normals[rows])
+    vertices = xp.einsum("pij,pvj->pvi", rotation, table.vertices[rows]) + centre[:, None, :]
+    normals = xp.einsum("pij,pfj->pfi", rotation, table.normals[rows])
     # a padding face keeps its zero normal and unit offset, so it still cuts nothing
-    offsets = table.offsets[rows] + np.einsum("pfi,pi->pf", normals, centre)
+    offsets = table.offsets[rows] + xp.einsum("pfi,pi->pf", normals, centre)
     return PolytopePose(rows, rotation, vertices, normals, offsets)
 
 
@@ -225,18 +246,20 @@ def rotation_matrices(orientations: npt.NDArray[np.float64]) -> npt.NDArray[np.f
     """Rotation matrices of a set of orientations.
 
     Args:
-        orientations: angles, shape (p,), in 2D, or unit quaternions (w, x, y, z), shape (p, 4), in 3D.
+        orientations: angles, shape (p,), in 2D, or unit quaternions (w, x, y, z), shape (p, 4), in 3D; NumPy or CuPy.
 
     Returns:
-        The matrices that turn the body frame into the space frame, shape (p, 2, 2) or (p, 3, 3).
+        The matrices that turn the body frame into the space frame, shape (p, 2, 2) or (p, 3, 3), on the device of the
+        orientations.
     """
+    xp = array_module(orientations)
     if orientations.ndim == 1:
-        c, s = np.cos(orientations), np.sin(orientations)
-        planar = np.empty((orientations.size, 2, 2))
+        c, s = xp.cos(orientations), xp.sin(orientations)
+        planar = xp.empty((orientations.size, 2, 2))
         planar[:, 0, 0], planar[:, 0, 1], planar[:, 1, 0], planar[:, 1, 1] = c, -s, s, c
         return planar
     w, x, y, z = orientations.T
-    matrix = np.empty((orientations.shape[0], 3, 3))
+    matrix = xp.empty((orientations.shape[0], 3, 3))
     matrix[:, 0, 0] = 1.0 - 2.0 * (y * y + z * z)
     matrix[:, 0, 1] = 2.0 * (x * y - w * z)
     matrix[:, 0, 2] = 2.0 * (x * z + w * y)

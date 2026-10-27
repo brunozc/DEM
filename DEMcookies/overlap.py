@@ -23,11 +23,13 @@ alone on that plane and changes nothing else measurably.
 """
 
 from dataclasses import dataclass, replace
+from types import ModuleType
 from typing import List, Tuple
 
 import numpy as np
 import numpy.typing as npt
 
+from .backend import array_module, quiet
 from .globals import OVERLAP_TIE_BREAK, PARALLEL_PLANES_TOLERANCE
 from .vectors import cross_3d, scatter_add
 
@@ -87,7 +89,8 @@ def _dots(normals: npt.NDArray[np.float64], points: npt.NDArray[np.float64]) -> 
     Returns:
         The dot product of every normal with its point, shape (..., p).
     """
-    return np.asarray((normals @ points[..., None])[..., 0])
+    xp = array_module(normals)
+    return xp.asarray((normals @ points[..., None])[..., 0])
 
 
 def _heights(vertices: npt.NDArray[np.float64], normals: npt.NDArray[np.float64],
@@ -102,7 +105,8 @@ def _heights(vertices: npt.NDArray[np.float64], normals: npt.NDArray[np.float64]
     Returns:
         The distances, shape (k, v, p) [m].
     """
-    return np.asarray(vertices @ normals.transpose(0, 2, 1) - offsets[:, None, :])
+    xp = array_module(vertices)
+    return xp.asarray(vertices @ normals.transpose(0, 2, 1) - offsets[:, None, :])
 
 
 def clip_lines(origin: npt.NDArray[np.float64], direction: npt.NDArray[np.float64], normals: npt.NDArray[np.float64],
@@ -121,14 +125,15 @@ def clip_lines(origin: npt.NDArray[np.float64], direction: npt.NDArray[np.float6
     Returns:
         The values of t where the part of each line inside starts and ends, and whether that part is not empty.
     """
+    xp = array_module(normals)
     start = _dots(normals, origin) - offsets
     rate = _dots(normals, direction)
-    with np.errstate(divide="ignore", invalid="ignore"):
+    with quiet(xp):
         crossing = -start / rate
     # a line enters a half-space it runs into against its normal, and leaves one it runs out of along it
-    t0 = np.maximum(np.max(np.where(rate < 0.0, crossing, -np.inf), axis=-1, initial=-np.inf), low)
-    t1 = np.minimum(np.min(np.where(rate > 0.0, crossing, np.inf), axis=-1, initial=np.inf), high)
-    outside = np.any((rate == 0.0) & (start > 0.0), axis=-1)
+    t0 = xp.maximum(xp.max(xp.where(rate < 0.0, crossing, -np.inf), axis=-1), low)
+    t1 = xp.minimum(xp.min(xp.where(rate > 0.0, crossing, np.inf), axis=-1), high)
+    outside = xp.any((rate == 0.0) & (start > 0.0), axis=-1)
     return t0, t1, (t1 > t0) & ~outside
 
 
@@ -163,13 +168,15 @@ def _inflated(region_offsets: npt.NDArray[np.float64], vertices: npt.NDArray[np.
     Returns:
         The pushed offsets [m].
     """
-    size = np.max(np.linalg.norm(vertices - vertices[:, :1], axis=2), axis=1)
-    return np.asarray(region_offsets + (OVERLAP_TIE_BREAK * size)[:, None])
+    xp = array_module(vertices)
+    size = xp.max(xp.linalg.norm(vertices - vertices[:, :1], axis=2), axis=1)
+    return xp.asarray(region_offsets + (OVERLAP_TIE_BREAK * size)[:, None])
 
 
 def _cross_2d(a: npt.NDArray[np.float64], b: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
     """Out-of-plane component of the cross product of vectors along the last axis."""
-    return np.asarray(a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0])
+    xp = array_module(a)
+    return xp.asarray(a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0])
 
 
 def _segment_parts(vertices: npt.NDArray[np.float64], normals: npt.NDArray[np.float64],
@@ -185,10 +192,11 @@ def _segment_parts(vertices: npt.NDArray[np.float64], normals: npt.NDArray[np.fl
         The start and the end of the part of each edge inside, both zero for an edge that lies outside, shape
         (k, v, 2) each [m].
     """
-    edge = np.roll(vertices, -1, axis=1) - vertices
+    xp = array_module(vertices)
+    edge = xp.roll(vertices, -1, axis=1) - vertices
     t0, t1, inside = clip_lines(vertices, edge, normals[:, None], offsets[:, None], 0.0, 1.0)
-    start = np.where(inside[..., None], vertices + t0[..., None] * edge, 0.0)
-    end = np.where(inside[..., None], vertices + t1[..., None] * edge, 0.0)
+    start = xp.where(inside[..., None], vertices + t0[..., None] * edge, 0.0)
+    end = xp.where(inside[..., None], vertices + t1[..., None] * edge, 0.0)
     return start, end
 
 
@@ -204,14 +212,15 @@ def _planar_overlap(
     Returns:
         The area of each region [m^2] and its centroid [m].
     """
-    area = np.zeros(origin.shape[0])
-    first = np.zeros_like(origin)
+    xp = array_module(origin)
+    area = xp.zeros(origin.shape[0])
+    first = xp.zeros_like(origin)
     for start, end in parts:
         twice = _cross_2d(start, end).reshape(origin.shape[0], -1)
         area += 0.5 * twice.sum(axis=1)
         first += (twice[..., None] * (start + end).reshape(origin.shape[0], -1, 2)).sum(axis=1) / 6.0
-    centroid = origin + first / np.where(area > 0.0, area, 1.0)[:, None]
-    return np.maximum(area, 0.0), centroid
+    centroid = origin + first / xp.where(area > 0.0, area, 1.0)[:, None]
+    return xp.maximum(area, 0.0), centroid
 
 
 def polygon_overlap(vertices_i: npt.NDArray[np.float64], normals_i: npt.NDArray[np.float64],
@@ -231,6 +240,7 @@ def polygon_overlap(vertices_i: npt.NDArray[np.float64], normals_i: npt.NDArray[
     Returns:
         The overlap of each pair.
     """
+    xp = array_module(vertices_i)
     vertices_j, offsets_j = _grown(vertices_j, normals_j, offsets_j)
     # coordinates relative to a point near both polygons keep the products accurate
     origin = 0.5 * (vertices_i[:, 0] + vertices_j[:, 0])
@@ -242,7 +252,7 @@ def polygon_overlap(vertices_i: npt.NDArray[np.float64], normals_i: npt.NDArray[
     area, centroid = _planar_overlap(origin, [(start_i, end_i), (start_j, end_j)])
     # the outward normal of a counter-clockwise edge is the edge turned clockwise; both outlines give the chord
     chord_j, chord_i = (end_j - start_j).sum(axis=1), (end_i - start_i).sum(axis=1)
-    surface = 0.5 * np.column_stack((chord_j[:, 1] - chord_i[:, 1], chord_i[:, 0] - chord_j[:, 0]))
+    surface = 0.5 * xp.column_stack((chord_j[:, 1] - chord_i[:, 1], chord_i[:, 0] - chord_j[:, 0]))
     return Overlap(area, centroid, surface)
 
 
@@ -265,28 +275,29 @@ def polygon_region_overlap(vertices: npt.NDArray[np.float64], normals: npt.NDArr
     Returns:
         The overlap of each polygon with its region.
     """
+    xp = array_module(vertices)
     region_offsets = _inflated(region_offsets, vertices)
     origin = vertices[:, 0]
     v = vertices - origin[:, None]
     h = offsets - _dots(normals, origin)
     hr = region_offsets - _dots(region_normals, origin)
     parts = [_segment_parts(v, region_normals, hr)]
-    planes = np.concatenate((region_normals, normals), axis=1)
-    planes_offsets = np.concatenate((hr, h), axis=1)
-    cap = np.zeros(vertices.shape[0])
+    planes = xp.concatenate((region_normals, normals), axis=1)
+    planes_offsets = xp.concatenate((hr, h), axis=1)
+    cap = xp.zeros(vertices.shape[0])
     for r in range(region_normals.shape[1]):
         normal = region_normals[:, r]
         # the counter-clockwise boundary runs along a line with the outward normal on its right
-        direction = np.column_stack((-normal[:, 1], normal[:, 0]))
+        direction = xp.column_stack((-normal[:, 1], normal[:, 0]))
         clip_normals, clip_offsets = planes.copy(), planes_offsets.copy()
         clip_normals[:, r], clip_offsets[:, r] = 0.0, 1.0
         t0, t1, inside = clip_lines(hr[:, r, None] * normal, direction, clip_normals, clip_offsets, -np.inf, np.inf)
-        inside &= np.isfinite(t0) & np.isfinite(t1)
-        start = np.where(inside[:, None], hr[:, r, None] * normal + t0[:, None] * direction, 0.0)
-        end = np.where(inside[:, None], hr[:, r, None] * normal + t1[:, None] * direction, 0.0)
+        inside &= xp.isfinite(t0) & xp.isfinite(t1)
+        start = xp.where(inside[:, None], hr[:, r, None] * normal + t0[:, None] * direction, 0.0)
+        end = xp.where(inside[:, None], hr[:, r, None] * normal + t1[:, None] * direction, 0.0)
         parts.append((start, end))
         if r == 0:
-            cap = np.where(inside, t1 - t0, 0.0)
+            cap = xp.where(inside, t1 - t0, 0.0)
     area, centroid = _planar_overlap(origin, parts)
     return Overlap(area, centroid, cap[:, None] * region_normals[:, 0])
 
@@ -308,12 +319,13 @@ def _edge_pieces(vertices: npt.NDArray[np.float64], edges: npt.NDArray[np.int64]
     Returns:
         The pieces on the left faces, and those on the right faces, which run the other way.
     """
-    pair_index = np.arange(vertices.shape[0])[:, None]
+    xp = array_module(vertices)
+    pair_index = xp.arange(vertices.shape[0])[:, None]
     head = distances[pair_index, edges[..., 0]]
     tail = distances[pair_index, edges[..., 1]]
     # an edge with both ends beyond one plane of the other body lies outside it; padding edges have zero length
-    candidate = ~np.any((head > 0.0) & (tail > 0.0), axis=2) & (edges[..., 0] != edges[..., 1])
-    pair, edge = np.nonzero(candidate)
+    candidate = ~xp.any((head > 0.0) & (tail > 0.0), axis=2) & (edges[..., 0] != edges[..., 1])
+    pair, edge = xp.nonzero(candidate)
     start = vertices[pair, edges[pair, edge, 0]]
     step = vertices[pair, edges[pair, edge, 1]] - start
     t0, t1, inside = clip_lines(start, step, normals[pair], offsets[pair], 0.0, 1.0)
@@ -341,9 +353,10 @@ def _line_pieces(pair: npt.NDArray[np.int64], first: npt.NDArray[np.int64], seco
     Returns:
         The pieces on the first planes, and those on the second planes.
     """
+    xp = array_module(normals)
     na, nb = normals[pair, first], normals[pair, second]
     ha, hb = offsets[pair, first], offsets[pair, second]
-    cosine = np.einsum("ij,ij->i", na, nb)
+    cosine = xp.einsum("ij,ij->i", na, nb)
     sine_sq = 1.0 - cosine * cosine
     meet = sine_sq > PARALLEL_PLANES_TOLERANCE
     pair, first, second = pair[meet], first[meet], second[meet]
@@ -352,13 +365,13 @@ def _line_pieces(pair: npt.NDArray[np.int64], first: npt.NDArray[np.int64], seco
     origin = (((ha - hb * cosine) / sine_sq)[:, None] * na + ((hb - ha * cosine) / sine_sq)[:, None] * nb)
     direction = cross_3d(na, nb)
     clip_normals, clip_offsets = normals[pair], offsets[pair]
-    line = np.arange(pair.size)
+    line = xp.arange(pair.size)
     # the line lies on its own two planes, which must not clip it
     for index in (first, second):
         clip_normals[line, index] = 0.0
         clip_offsets[line, index] = 1.0
     t0, t1, inside = clip_lines(origin, direction, clip_normals, clip_offsets, -np.inf, np.inf)
-    inside &= np.isfinite(t0) & np.isfinite(t1)
+    inside &= xp.isfinite(t0) & xp.isfinite(t1)
     p = origin[inside] + t0[inside, None] * direction[inside]
     q = origin[inside] + t1[inside, None] * direction[inside]
     return [(pair[inside], p, q, first[inside]), (pair[inside], q, p, second[inside])]
@@ -375,17 +388,18 @@ def _straddling(faces: npt.NDArray[np.int64], distances: npt.NDArray[np.float64]
         True where a face has vertices on both sides of a plane and lies beyond no plane of the other body as a
         whole, shape (k, f, p).
     """
-    pair_index = np.arange(faces.shape[0])[:, None]
-    low = np.full((faces.shape[0], faces.shape[1], distances.shape[2]), np.inf)
-    high = np.full_like(low, -np.inf)
+    xp = array_module(distances)
+    pair_index = xp.arange(faces.shape[0])[:, None]
+    low = xp.full((faces.shape[0], faces.shape[1], distances.shape[2]), np.inf)
+    high = xp.full_like(low, -np.inf)
     # one corner at a time keeps the memory to that of a face-plane table
     for corner in range(faces.shape[2]):
         value = distances[pair_index, faces[:, :, corner]]
-        low = np.minimum(low, value)
-        high = np.maximum(high, value)
+        low = xp.minimum(low, value)
+        high = xp.maximum(high, value)
     # a face beyond one plane of the other body as a whole meets none of its faces
-    reaches = ~np.any(low > 0.0, axis=2)
-    return np.asarray((low < 0.0) & (high > 0.0) & reaches[:, :, None])
+    reaches = ~xp.any(low > 0.0, axis=2)
+    return xp.asarray((low < 0.0) & (high > 0.0) & reaches[:, :, None])
 
 
 def _solid_overlap(count: int, origin: npt.NDArray[np.float64], normals: npt.NDArray[np.float64],
@@ -407,25 +421,26 @@ def _solid_overlap(count: int, origin: npt.NDArray[np.float64], normals: npt.NDA
     Returns:
         The overlaps.
     """
-    pair = np.concatenate([piece[0] for piece in pieces])
-    p = np.concatenate([piece[1] for piece in pieces])
-    q = np.concatenate([piece[2] for piece in pieces])
-    plane = np.concatenate([piece[3] for piece in pieces])
+    xp = array_module(origin)
+    pair = xp.concatenate([piece[0] for piece in pieces])
+    p = xp.concatenate([piece[1] for piece in pieces])
+    q = xp.concatenate([piece[2] for piece in pieces])
+    plane = xp.concatenate([piece[3] for piece in pieces])
     normal = normals[pair, plane]
     height = offsets[pair, plane]
     moment = cross_3d(p, q)
-    volume = height * np.einsum("ij,ij->i", normal, moment) / 6.0
-    measure = np.bincount(pair, volume, count)
+    volume = height * xp.einsum("ij,ij->i", normal, moment) / 6.0
+    measure = xp.bincount(pair, volume, count)
     first = scatter_add(pair, volume[:, None] * (height[:, None] * normal + p + q) / 4.0, count)
     on_surface = surface_planes[plane]
     surface = scatter_add(pair[on_surface], 0.5 * moment[on_surface], count)
-    centroid = origin + first / np.where(measure > 0.0, measure, 1.0)[:, None]
-    return Overlap(np.maximum(measure, 0.0), centroid, surface)
+    centroid = origin + first / xp.where(measure > 0.0, measure, 1.0)[:, None]
+    return Overlap(xp.maximum(measure, 0.0), centroid, surface)
 
 
-def _empty_overlap(count: int, dimension: int) -> Overlap:
-    """Overlaps of bodies that do not overlap."""
-    return Overlap(np.zeros(count), np.zeros((count, dimension)), np.zeros((count, dimension)))
+def _empty_overlap(count: int, dimension: int, xp: ModuleType) -> Overlap:
+    """Overlaps of bodies that do not overlap, in the memory of the device of an array module."""
+    return Overlap(xp.zeros(count), xp.zeros((count, dimension)), xp.zeros((count, dimension)))
 
 
 def _expand(overlap: Overlap, live: npt.NDArray[np.int64], count: int) -> Overlap:
@@ -439,7 +454,7 @@ def _expand(overlap: Overlap, live: npt.NDArray[np.int64], count: int) -> Overla
     Returns:
         The overlaps of all the contacts.
     """
-    full = _empty_overlap(count, overlap.centroid.shape[1])
+    full = _empty_overlap(count, overlap.centroid.shape[1], array_module(live))
     full.measure[live] = overlap.measure
     full.centroid[live] = overlap.centroid
     full.surface[live] = overlap.surface
@@ -474,6 +489,7 @@ def polyhedron_overlap(i: Polyhedra, j: Polyhedra) -> Overlap:
     Returns:
         The overlap of each pair.
     """
+    xp = array_module(i.vertices)
     count = i.vertices.shape[0]
     grown_vertices, grown_offsets = _grown(j.vertices, j.normals, j.offsets)
     j = replace(j, vertices=grown_vertices, offsets=grown_offsets)
@@ -482,21 +498,21 @@ def polyhedron_overlap(i: Polyhedra, j: Polyhedra) -> Overlap:
     vj, hj = _relative(j, origin)
     beyond_j = _heights(vi, j.normals, hj)
     beyond_i = _heights(vj, i.normals, hi)
-    apart = np.any(np.all(beyond_j > 0.0, axis=1), axis=1) | np.any(np.all(beyond_i > 0.0, axis=1), axis=1)
-    live = np.flatnonzero(~apart)
+    apart = xp.any(xp.all(beyond_j > 0.0, axis=1), axis=1) | xp.any(xp.all(beyond_i > 0.0, axis=1), axis=1)
+    live = xp.flatnonzero(~apart)
     if live.size == 0:
-        return _empty_overlap(count, 3)
+        return _empty_overlap(count, 3, xp)
 
     faces_i = i.normals.shape[1]
-    normals = np.concatenate((i.normals[live], j.normals[live]), axis=1)
-    offsets = np.concatenate((hi[live], hj[live]), axis=1)
+    normals = xp.concatenate((i.normals[live], j.normals[live]), axis=1)
+    offsets = xp.concatenate((hi[live], hj[live]), axis=1)
     pieces = _edge_pieces(vi[live], i.edges[live], i.edge_faces[live], beyond_j[live], j.normals[live], hj[live], 0)
     pieces += _edge_pieces(vj[live], j.edges[live], j.edge_faces[live], beyond_i[live], i.normals[live], hi[live],
                            faces_i)
     meeting = _straddling(i.faces[live], beyond_j[live]) & _straddling(j.faces[live], beyond_i[live]).transpose(0, 2, 1)
-    pair, face_i, face_j = np.nonzero(meeting)
+    pair, face_i, face_j = xp.nonzero(meeting)
     pieces += _line_pieces(pair, face_i, faces_i + face_j, normals, offsets)
-    surface_planes = np.arange(normals.shape[1]) >= faces_i
+    surface_planes = xp.arange(normals.shape[1]) >= faces_i
     return _expand(_solid_overlap(live.size, origin[live], normals, offsets, pieces, surface_planes), live, count)
 
 
@@ -515,31 +531,32 @@ def polyhedron_region_overlap(bodies: Polyhedra, region_normals: npt.NDArray[np.
     Returns:
         The overlap of each polyhedron with its region.
     """
+    xp = array_module(bodies.vertices)
     count = bodies.vertices.shape[0]
     region_offsets = _inflated(region_offsets, bodies.vertices)
     origin = bodies.vertices[:, 0]
     v, h = _relative(bodies, origin)
     hr = region_offsets - _dots(region_normals, origin)
     beyond = _heights(v, region_normals, hr)
-    live = np.flatnonzero(~np.any(np.all(beyond > 0.0, axis=1), axis=1))
+    live = xp.flatnonzero(~xp.any(xp.all(beyond > 0.0, axis=1), axis=1))
     if live.size == 0:
-        return _empty_overlap(count, 3)
+        return _empty_overlap(count, 3, xp)
 
     faces = bodies.normals.shape[1]
     planes = region_normals.shape[1]
-    normals = np.concatenate((bodies.normals[live], region_normals[live]), axis=1)
-    offsets = np.concatenate((h[live], hr[live]), axis=1)
+    normals = xp.concatenate((bodies.normals[live], region_normals[live]), axis=1)
+    offsets = xp.concatenate((h[live], hr[live]), axis=1)
     pieces = _edge_pieces(v[live], bodies.edges[live], bodies.edge_faces[live], beyond[live], region_normals[live],
                           hr[live], 0)
     # the planes of the region are unbounded, so only the faces of the polyhedron can be tested for a crossing
-    pair, face, plane = np.nonzero(_straddling(bodies.faces[live], beyond[live]))
+    pair, face, plane = xp.nonzero(_straddling(bodies.faces[live], beyond[live]))
     pieces += _line_pieces(pair, face, faces + plane, normals, offsets)
     # the region has no edges of its own: they lie where two of its planes meet
-    first, second = np.triu_indices(planes, 1)
-    pair = np.repeat(np.arange(live.size), first.size)
-    pieces += _line_pieces(pair, faces + np.tile(first, live.size), faces + np.tile(second, live.size), normals,
+    first, second = xp.triu_indices(planes, 1)
+    pair = xp.repeat(xp.arange(live.size), first.size)
+    pieces += _line_pieces(pair, faces + xp.tile(first, live.size), faces + xp.tile(second, live.size), normals,
                            offsets)
-    surface_planes = np.arange(normals.shape[1]) == faces
+    surface_planes = xp.arange(normals.shape[1]) == faces
     return _expand(_solid_overlap(live.size, origin[live], normals, offsets, pieces, surface_planes), live, count)
 
 
@@ -558,22 +575,23 @@ def polygon_distance(points: npt.NDArray[np.float64], vertices: npt.NDArray[np.f
         The distance from each point to its polygon, negative inside [m], and the unit normal at the closest point
         of the outline, pointing towards the point, shape (k, 2).
     """
+    xp = array_module(points)
     count = points.shape[0]
-    rows = np.arange(count)
+    rows = xp.arange(count)
     height = _dots(normals, points) - offsets
-    deepest = np.argmax(height, axis=1)
+    deepest = xp.argmax(height, axis=1)
     inside = height[rows, deepest] <= 0.0
-    edge = np.roll(vertices, -1, axis=1) - vertices
+    edge = xp.roll(vertices, -1, axis=1) - vertices
     relative = points[:, None, :] - vertices
-    length_sq = np.einsum("kvd,kvd->kv", edge, edge)
-    along = np.clip(np.einsum("kvd,kvd->kv", relative, edge) / np.where(length_sq > 0.0, length_sq, 1.0), 0.0, 1.0)
+    length_sq = xp.einsum("kvd,kvd->kv", edge, edge)
+    along = xp.clip(xp.einsum("kvd,kvd->kv", relative, edge) / xp.where(length_sq > 0.0, length_sq, 1.0), 0.0, 1.0)
     offset = relative - along[..., None] * edge
-    gap_sq = np.einsum("kvd,kvd->kv", offset, offset)
-    closest = np.argmin(gap_sq, axis=1)
-    gap = np.sqrt(gap_sq[rows, closest])
-    away = offset[rows, closest] / np.where(gap > 0.0, gap, 1.0)[:, None]
-    distance = np.where(inside, height[rows, deepest], gap)
-    normal = np.where(inside[:, None], normals[rows, deepest], away)
+    gap_sq = xp.einsum("kvd,kvd->kv", offset, offset)
+    closest = xp.argmin(gap_sq, axis=1)
+    gap = xp.sqrt(gap_sq[rows, closest])
+    away = offset[rows, closest] / xp.where(gap > 0.0, gap, 1.0)[:, None]
+    distance = xp.where(inside, height[rows, deepest], gap)
+    normal = xp.where(inside[:, None], normals[rows, deepest], away)
     return distance, normal
 
 
@@ -591,35 +609,36 @@ def polyhedron_distance(points: npt.NDArray[np.float64],
         The distance from each point to its polyhedron, negative inside [m], and the unit normal at the closest point
         of the surface, pointing towards the point, shape (k, 3).
     """
+    xp = array_module(points)
     count = points.shape[0]
-    rows = np.arange(count)
+    rows = xp.arange(count)
     height = _dots(bodies.normals, points) - bodies.offsets
-    deepest = np.argmax(height, axis=1)
+    deepest = xp.argmax(height, axis=1)
     inside = height[rows, deepest] <= 0.0
 
     # the foot of the point on a face plane, if it lies inside the face
     foot = points[:, None, :] - height[..., None] * bodies.normals
     corners = bodies.vertices[rows[:, None, None], bodies.faces]
-    sides = np.roll(corners, -1, axis=2) - corners
-    turn = np.einsum("kfmd,kfd->kfm", cross_3d(sides, foot[:, :, None, :] - corners), bodies.normals)
-    on_face = (height > 0.0) & np.all(turn >= 0.0, axis=2)
-    face_gap = np.where(on_face, height, np.inf)
-    best_face = np.argmin(face_gap, axis=1)
+    sides = xp.roll(corners, -1, axis=2) - corners
+    turn = xp.einsum("kfmd,kfd->kfm", cross_3d(sides, foot[:, :, None, :] - corners), bodies.normals)
+    on_face = (height > 0.0) & xp.all(turn >= 0.0, axis=2)
+    face_gap = xp.where(on_face, height, np.inf)
+    best_face = xp.argmin(face_gap, axis=1)
 
     start = bodies.vertices[rows[:, None], bodies.edges[..., 0]]
     edge = bodies.vertices[rows[:, None], bodies.edges[..., 1]] - start
     relative = points[:, None, :] - start
-    length_sq = np.einsum("ked,ked->ke", edge, edge)
-    along = np.clip(np.einsum("ked,ked->ke", relative, edge) / np.where(length_sq > 0.0, length_sq, 1.0), 0.0, 1.0)
+    length_sq = xp.einsum("ked,ked->ke", edge, edge)
+    along = xp.clip(xp.einsum("ked,ked->ke", relative, edge) / xp.where(length_sq > 0.0, length_sq, 1.0), 0.0, 1.0)
     offset = relative - along[..., None] * edge
-    gap_sq = np.einsum("ked,ked->ke", offset, offset)
-    best_edge = np.argmin(gap_sq, axis=1)
-    edge_gap = np.sqrt(gap_sq[rows, best_edge])
+    gap_sq = xp.einsum("ked,ked->ke", offset, offset)
+    best_edge = xp.argmin(gap_sq, axis=1)
+    edge_gap = xp.sqrt(gap_sq[rows, best_edge])
 
     use_face = face_gap[rows, best_face] <= edge_gap
-    gap = np.where(use_face, face_gap[rows, best_face], edge_gap)
-    away = np.where(use_face[:, None], bodies.normals[rows, best_face],
-                    offset[rows, best_edge] / np.where(edge_gap > 0.0, edge_gap, 1.0)[:, None])
-    distance = np.where(inside, height[rows, deepest], gap)
-    normal = np.where(inside[:, None], bodies.normals[rows, deepest], away)
+    gap = xp.where(use_face, face_gap[rows, best_face], edge_gap)
+    away = xp.where(use_face[:, None], bodies.normals[rows, best_face],
+                    offset[rows, best_edge] / xp.where(edge_gap > 0.0, edge_gap, 1.0)[:, None])
+    distance = xp.where(inside, height[rows, deepest], gap)
+    normal = xp.where(inside[:, None], bodies.normals[rows, deepest], away)
     return distance, normal

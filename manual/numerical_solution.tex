@@ -928,6 +928,14 @@ A frame of a simulation with polytopes also stores their orientations and shares
 The plots draw a polygon as its outline, and a polyhedron as its faces in the oblique view and as the polygon that the section plane cuts out of it in a section.
 The VTK export writes a fifth series, \texttt{shapes}, with the outline of every polygon or the faces of every polyhedron as polygons, and flags the spheres in the series of the particles, so that the ParaView script draws only those as Gaussian spheres.
 
+\paragraph{Device.}
+The overlaps can be measured on a GPU instead, with CuPy, the counterpart of NumPy for GPUs.
+The functions that measure them take the array module of their arguments, NumPy or CuPy, so the same code runs on either device.
+A simulation on the device \texttt{gpu} keeps a copy of the table of shapes in the memory of the GPU, made again whenever the table is replaced, places the polytopes there at every force evaluation from their positions and orientations, and measures their overlaps there.
+Only the volumes, centroids and contact surfaces come back to the CPU, which computes everything else, the contact law included.
+The results agree with those of the CPU to rounding, about $10^{-10}$ of the largest force.
+A pickled simulation holds nothing in the memory of the GPU, so a checkpoint made on one device carries on on the other.
+
 \paragraph{Cost.}
 A contact between polytopes costs far more than one between spheres: gathering the shapes, filtering, clipping and summing take a few hundred array operations per batch, and the clipping grows with the numbers of faces and edges near the contact.
 A step of a bed of \num{45} polyhedra with ten to fourteen vertices each and some \num{45} contacts takes about \qty{6}{\milli\second}, against about \qty{1}{\milli\second} for as many spheres.

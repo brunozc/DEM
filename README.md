@@ -130,6 +130,22 @@ on its closest point, and a polytope pressing on a wall overlaps the solid behin
 several times more than those of spheres; the sections "Polygonal and polyhedral particles" of the manual give the
 formulation and the numerics.
 
+### GPU
+
+Measuring how polygons and polyhedra overlap is most of the work of a simulation with shaped particles, and a GPU does
+it many times faster. With `device="gpu"` a simulation keeps the shapes on the GPU and measures the overlaps there with
+[CuPy](https://cupy.dev), while everything else, spheres included, stays on the CPU; the results agree with those of
+the CPU to rounding. CuPy is optional: install it with `pip install -e ".[gpu]"` (for CUDA 12), or a CuPy build that
+suits your CUDA. The default, `device="cpu"`, needs NumPy only.
+
+```python
+sim = DEMSimulation(geometry, material, radius_range=(0.004, 0.02), shapes=shapes, device="gpu")
+sim.device = "cpu"  # e.g. to carry on with a checkpoint on a machine without a GPU
+```
+
+A pickled simulation holds nothing in the memory of the GPU, so a checkpoint made on a GPU carries on on a CPU and the
+other way round. The ballast scripts take `--device gpu`.
+
 ### ParaView
 
 A `VTKWriter` exports a simulation, 2D or 3D, to VTK files for [ParaView](https://www.paraview.org). Attached to a
@@ -219,6 +235,21 @@ python examples/ballast_cyclic_3d_post.py
 SLURM cluster, and [ballast_cyclic_3d_post.py](examples/ballast_cyclic_3d_post.py) turns the results in
 `output/ballast_3d/` into figures. Both stages also write ParaView files, every 2000 time steps by default
 (`--save-every-n-steps`), some 1.2 GB per run.
+
+To see what the shape of the stones does, `--grains polyhedra` runs the same study, and the preloaded one of
+[ballast_cyclic_3d_preloaded.py](examples/ballast_cyclic_3d_preloaded.py), with irregular polyhedral stones of the same
+grading and mass instead of spheres with rolling resistance, and
+[ballast_cyclic_3d_shapes.py](examples/ballast_cyclic_3d_shapes.py) compares the two:
+
+```bash
+python examples/ballast_cyclic_3d.py deposit --packing 0 --grains polyhedra --device gpu
+python examples/ballast_cyclic_3d.py load --packing 0 --case dry --grains polyhedra --device gpu
+python examples/ballast_cyclic_3d_shapes.py              # or --preloaded
+```
+
+Polyhedra cost far more: a full packing takes some 31 h per load cycle on one core and 3 to 4.5 h on a laptop GPU, so
+time the GPU you have with [benchmark_polyhedra.py](examples/benchmark_polyhedra.py) before planning a study; the
+SLURM files explain how to submit the jobs to GPU nodes.
 
 ## Manual
 
