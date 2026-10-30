@@ -11,7 +11,8 @@ import pytest
 from numpy.testing import assert_allclose
 
 from DEMcookies import (BoundaryCondition, DEMSimulation, Geometry, Geometry3D, GlobalSettings, Heaviside, LoadedPlaten,
-                        MaterialProperties, Open, Particle, Particle3D, RainSettings, Wall, generate_lattice_particles)
+                        MaterialProperties, Open, Particle, Particle3D, PrescribedPlaten, RainSettings, Sinusoidal,
+                        TimeHistory, Wall, generate_lattice_particles)
 from DEMcookies.solver import VelocityVerlet
 
 
@@ -48,6 +49,17 @@ def _static_overlap(material: MaterialProperties, radius: float, force: float) -
 def _sphere_mass(material: MaterialProperties, radius: float) -> float:
     """Return the mass of a particle [kg]."""
     return material.density * 4.0 / 3.0 * math.pi * radius**3
+
+
+def _seated_indentation(material: MaterialProperties, radius: float, force: float) -> float:
+    """Return how far a platen seated on a particle resting on a floor travels to press it with a force [m].
+
+    The particle already rests on the floor at the overlap of its weight, and the platen adds its own overlap on top
+    and pushes the particle further into the floor.
+    """
+    weight = _sphere_mass(material, radius) * 9.81
+    return (_static_overlap(material, radius, force) + _static_overlap(material, radius, force + weight) -
+            _static_overlap(material, radius, weight))
 
 
 class TestVelocityVerlet:
@@ -134,9 +146,10 @@ class TestDEMSimulationSetup:
             DEMSimulation(Geometry.rectangle(0.1, 0.1), _material(), radius_range=(0.01, 0.01), dt=-1.0e-5)
 
     def test_compress_without_platen_is_rejected(self) -> None:
-        """Loading needs a LoadedPlaten edge."""
+        """Loading needs a LoadedPlaten or PrescribedPlaten edge."""
         sim = DEMSimulation(Geometry.rectangle(0.1, 0.1), _material(), radius_range=(0.01, 0.01))
-        with pytest.raises(ValueError, match=re.escape("The geometry has no LoadedPlaten edge to apply a load with.")):
+        message = "The geometry has no LoadedPlaten or PrescribedPlaten edge to apply a load with."
+        with pytest.raises(ValueError, match=re.escape(message)):
             sim.compress(0.1)
 
     def test_negative_duration_is_rejected(self) -> None:
@@ -259,9 +272,10 @@ class TestDEMSimulationPhysics:
         assert_allclose(platen.offset, offset, atol=1e-9)
 
     def test_seat_without_platen_is_rejected(self) -> None:
-        """Seating needs a LoadedPlaten edge."""
+        """Seating needs a LoadedPlaten or PrescribedPlaten edge."""
         sim = DEMSimulation(Geometry.rectangle(0.1, 0.1), _material(), radius_range=(0.01, 0.01))
-        with pytest.raises(ValueError, match=re.escape("The geometry has no LoadedPlaten edge to seat.")):
+        with pytest.raises(ValueError,
+                           match=re.escape("The geometry has no LoadedPlaten or PrescribedPlaten edge to seat.")):
             sim.seat_platens()
 
     def test_seat_after_loading_is_rejected(self) -> None:
@@ -351,6 +365,90 @@ class TestDEMSimulationPhysics:
         np.fill_diagonal(gap, np.inf)
         assert gap.min() > -0.05 * sim.radius_range[0]
         assert len(sim.frames) > 0
+
+
+class TestPrescribedPlaten:
+    """Tests of displacement-controlled platens against closed-form results."""
+
+    def test_loaded_and_prescribed_footings_reach_their_equilibrium(self) -> None:
+        """A footing pressed in by the Hertz indentation of a load must feel that load, beside a loaded footing."""
+        material = _material()
+        load = 2.0
+        indentation = _seated_indentation(material, 0.01, load)
+        loaded = LoadedPlaten(load=Heaviside(load, rise_time=0.05), mass=0.2)
+        prescribed = PrescribedPlaten(displacement=Heaviside(indentation, rise_time=0.05))
+        vertices = [(0.0, 0.0), (0.12, 0.0), (0.12, 0.1), (0.1, 0.1), (0.08, 0.1), (0.04, 0.1), (0.02, 0.1), (0.0, 0.1)]
+        geometry = Geometry(vertices, [Wall(), Wall(), Open(), prescribed, Open(), loaded, Open(), Wall()])
+        sim = DEMSimulation(geometry, material, particles=[Particle(0.09, 0.01, 0.01), Particle(0.03, 0.01, 0.01)])
+        sim.rest(0.2)
+        sim.compress(0.4)
+
+        driven, pushed = sim.platens
+        assert driven.prescribed and not pushed.prescribed
+        assert_allclose(driven.displacement, indentation, rtol=1e-12)
+        # the driven footing does not oscillate about its equilibrium, so it reaches it far more closely
+        assert_allclose(driven.reaction, load, rtol=1e-9)
+        assert_allclose(0.01 - sim.pos[0, 1],
+                        _static_overlap(material, 0.01, load + _sphere_mass(material, 0.01) * 9.81),
+                        rtol=1e-9)
+        assert_allclose(pushed.reaction, load, rtol=1e-2)
+        curve = sim.load_curves[0].as_array()
+        assert_allclose(curve[:, 1], curve[:, 3], rtol=0.0, atol=0.0)
+
+    def test_platen_follows_its_displacement_history(self) -> None:
+        """A sinusoidally driven platen must be where its history puts it, whatever the particle pushes back with."""
+        material = _material()
+        amplitude, frequency = 0.5 * _seated_indentation(material, 0.01, 2.0), 10.0
+        history = Sinusoidal(amplitude, frequency, mean=amplitude, phase=-0.5 * math.pi)
+        geometry = Geometry.rectangle(0.1, 0.1, top=PrescribedPlaten(displacement=history))
+        sim = DEMSimulation(geometry, material, particles=[Particle(0.05, 0.01, 0.01)])
+        sim.rest(0.2)
+        sim.compress(0.25, record_every=10)
+
+        time, applied, displacement, reaction = sim.load_curves[0].as_array().T
+        assert_allclose(displacement, [history(t) for t in time], rtol=0.0, atol=1e-15)
+        assert_allclose(applied, reaction, rtol=0.0, atol=0.0)
+        assert np.all(reaction >= 0.0) and np.max(reaction) > 1.0
+        # the velocity of the last step is its mean, which is the velocity half way through it to second order
+        platen = sim.platens[0]
+        omega = 2.0 * math.pi * frequency
+        expected = amplitude * omega * math.sin(omega * (sim.load_time - 0.5 * sim.dt))
+        assert_allclose(platen.velocity, expected, rtol=0.0, atol=1e-6 * amplitude * omega)
+
+    def test_platen_drawn_back_loses_contact(self) -> None:
+        """A platen pressed in and then drawn back past first contact must leave the particle and feel no reaction."""
+        material = _material()
+        load = 2.0
+        indentation = _seated_indentation(material, 0.01, load)
+        history = TimeHistory([0.0, 0.05, 0.15, 0.2], [0.0, indentation, indentation, -indentation])
+        geometry = Geometry.rectangle(0.1, 0.1, top=PrescribedPlaten(displacement=history))
+        sim = DEMSimulation(geometry, material, particles=[Particle(0.05, 0.01, 0.01)])
+        sim.rest(0.2)
+        sim.compress(0.4)
+
+        time, _, _, reaction = sim.load_curves[0].as_array().T
+        held = (time > 0.14) & (time < 0.15)
+        assert_allclose(reaction[held], load, rtol=1e-3)
+        assert_allclose(reaction[time > 0.2], 0.0, atol=0.0)
+        weight = _sphere_mass(material, 0.01) * 9.81
+        assert_allclose(0.01 - sim.pos[0, 1], _static_overlap(material, 0.01, weight), rtol=1e-3)
+
+    def test_lid_reproduces_the_hertz_reaction_in_3d(self) -> None:
+        """A lid pressed in by the Hertz indentation of a load must feel that load in 3D as well."""
+        material = _material()
+        load = 2.0
+        indentation = _seated_indentation(material, 0.01, load)
+        lid = PrescribedPlaten(displacement=Heaviside(indentation, rise_time=0.05))
+        sim = DEMSimulation(Geometry3D.box(0.1, 0.1, 0.1, top=lid),
+                            material,
+                            particles=[Particle3D(0.05, 0.01, 0.05, 0.01)])
+        sim.rest(0.3)
+        sim.compress(0.4)
+
+        platen = sim.platens[0]
+        assert_allclose(platen.displacement, indentation, rtol=1e-12)
+        assert_allclose(platen.reaction, load, rtol=1e-9)
+        assert_allclose(sim.face_forces[2], [0.0, load, 0.0], rtol=1e-9, atol=1e-12)
 
 
 def _rotation(axis: Tuple[float, float, float], angle: float) -> npt.NDArray[np.float64]:
@@ -446,11 +544,13 @@ class TestDEMSimulation3DSetup:
                                      Particle3D(0.05, 0.05, 0.2, 0.01)])
 
     def test_loading_without_platen_face_is_rejected(self) -> None:
-        """Loading and seating need a LoadedPlaten face."""
+        """Loading and seating need a LoadedPlaten or PrescribedPlaten face."""
         sim = DEMSimulation(Geometry3D.box(0.1, 0.1, 0.1), _material(), radius_range=(0.01, 0.01))
-        with pytest.raises(ValueError, match=re.escape("The geometry has no LoadedPlaten face to apply a load with.")):
+        message = "The geometry has no LoadedPlaten or PrescribedPlaten face to apply a load with."
+        with pytest.raises(ValueError, match=re.escape(message)):
             sim.compress(0.1)
-        with pytest.raises(ValueError, match=re.escape("The geometry has no LoadedPlaten face to seat.")):
+        with pytest.raises(ValueError,
+                           match=re.escape("The geometry has no LoadedPlaten or PrescribedPlaten face to seat.")):
             sim.seat_platens()
 
 

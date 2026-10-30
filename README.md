@@ -22,9 +22,11 @@ which.
 - Velocity Verlet time integration with a time step set from the Rayleigh wave speed.
 - Contact detection with a cell grid and a Verlet neighbour list.
 - A polygonal domain (`Geometry`) whose edges, or a polyhedral domain (`Geometry3D`) whose planar faces, are each a
-  `Wall`, `Open`, or a `LoadedPlaten`. Facets that share one `LoadedPlaten` form a single rigid body, such as a plate,
-  a wedge, a curved indenter or a square footing. `Geometry3D.extrude` turns a 2D domain into a 3D prism.
-- Load histories: `Pulse`, `Heaviside`, `Sinusoidal`, `TimeHistory`, or any function of time.
+  `Wall`, `Open`, a `LoadedPlaten` or a `PrescribedPlaten`. Facets that share one platen form a single rigid body,
+  such as a plate, a wedge, a curved indenter or a square footing. A `LoadedPlaten` is force-controlled: it moves
+  under its load. A `PrescribedPlaten` is displacement-controlled: it follows its displacement history and records
+  the reaction needed to do so. `Geometry3D.extrude` turns a 2D domain into a 3D prism.
+- Load and displacement histories: `Pulse`, `Heaviside`, `Sinusoidal`, `TimeHistory`, or any function of time.
 - Pore water below a water table, with buoyancy, porosity-dependent drag, optional seepage and an optional coupled
   excess pore pressure for undrained loading and consolidation.
 - Animations of the simulation, in an oblique view or a vertical section in 3D, as GIF or as MP4 (with ffmpeg), and
@@ -78,6 +80,22 @@ sim.compress(1.0, record_every=60)  # apply the load through the platen [s]
 ```
 
 See [main.py](main.py) for the full script, including the output.
+
+### Displacement control
+
+A `PrescribedPlaten` moves by a prescribed displacement [m] instead of under a load, whatever the particles push back
+with. The load curve records the reaction it needs to do so. The same histories serve as displacements. A
+displacement must start from zero, so a sinusoid is shifted to start smoothly:
+
+```python
+import math
+
+from DEMcookies import PrescribedPlaten, Sinusoidal
+
+# mean = amplitude and phase = -pi / 2 start the cycles from zero, as a prescribed displacement must
+displacement = Sinusoidal(amplitude=1.0e-3, frequency=5.0, mean=1.0e-3, phase=-0.5 * math.pi)
+geometry = Geometry.rectangle(width=0.2, height=0.6, top=PrescribedPlaten(displacement=displacement))
+```
 
 ### Three dimensions
 

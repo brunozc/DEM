@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
-from DEMcookies.boundary import BoundaryCondition, LoadedPlaten, Open, Platen, Wall
+from DEMcookies.boundary import BoundaryCondition, LoadedPlaten, Open, Platen, PrescribedPlaten, Wall
 from DEMcookies.geometry import Geometry
 from DEMcookies.geometry3d import Geometry3D
 from DEMcookies.loads import Heaviside
@@ -83,6 +83,19 @@ class TestGeometry3D:
         assert bodies[(3, 4, 5)] is not platen and bodies[(3, 4, 5)].direction == (0.0, -1.0, 0.0)
         assert_allclose(prism.bounding_box, (0.0, 0.0, -0.25, 1.0, 1.0, 0.25))
         assert_allclose(prism.volume, 0.5 * Geometry(vertices, [Wall()] * 8).area)
+
+    def test_extrude_carries_a_prescribed_body(self) -> None:
+        """A prescribed body with a 2D direction must be extruded into one copy moving in the x-y plane."""
+        wedge = PrescribedPlaten(displacement=Heaviside(1.0e-3, rise_time=1.0), direction=(0.0, -1.0))
+        vertices = [(0, 0), (1, 0), (1, 1), (0.6, 1), (0.5, 0.8), (0.4, 1), (0, 1)]
+        conditions: List[BoundaryCondition] = [Wall(), Wall(), Open(), wedge, wedge, Open(), Wall()]
+        prism = Geometry3D.extrude(Geometry(vertices, conditions), 0.5)
+        assert len(prism.platen_groups) == 1
+        spec, indices = prism.platen_groups[0]
+        assert indices == (3, 4)
+        assert isinstance(spec, PrescribedPlaten) and spec is not wedge
+        assert spec.direction == (0.0, -1.0, 0.0)
+        assert spec.displacement is wedge.displacement
 
     def test_faces_sharing_a_platen_form_one_body(self) -> None:
         """Faces that carry the same LoadedPlaten object must form one body moving along the mean inward normal."""

@@ -8,9 +8,10 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose
 
-from DEMcookies.boundary import LoadedPlaten, Open, Platen, Wall, resolve_body_direction, resolve_direction
+from DEMcookies.boundary import (LoadedPlaten, Open, Platen, PrescribedPlaten, Wall, resolve_body_direction,
+                                 resolve_direction)
 from DEMcookies.geometry import Geometry, project_onto_segments
-from DEMcookies.loads import Heaviside
+from DEMcookies.loads import Heaviside, Sinusoidal, TimeHistory
 
 
 class TestGeometry:
@@ -100,10 +101,25 @@ class TestGeometry:
         shape = Geometry(vertices, [Wall(), Wall(), right, Open(), left, Wall()])
         assert [edges for _, edges in shape.platen_groups] == [(2, ), (4, )]
 
+    def test_loaded_and_prescribed_platens_are_separate_bodies(self) -> None:
+        """Edges sharing a PrescribedPlaten must form one body, apart from a LoadedPlaten in the same domain."""
+        loaded = LoadedPlaten(load=Heaviside(1.0), mass=1.0)
+        wedge = PrescribedPlaten(displacement=Heaviside(1.0e-3, rise_time=1.0))
+        vertices = [(0, 0), (1, 0), (1, 1), (0.8, 1), (0.7, 0.8), (0.6, 1), (0.4, 1), (0.2, 1), (0, 1)]
+        shape = Geometry(vertices, [Wall(), Wall(), Open(), wedge, wedge, Open(), loaded, Open(), Wall()])
+        assert shape.platen_groups == ((wedge, (3, 4)), (loaded, (6, )))
+
     def test_cancelling_normals_are_rejected(self) -> None:
         """A body on opposite sides of the domain has no default direction and must be rejected."""
         both = LoadedPlaten(load=Heaviside(1.0), mass=1.0)
         message = "The inward normals of the platen edges cancel out; give the LoadedPlaten an explicit direction."
+        with pytest.raises(ValueError, match=re.escape(message)):
+            Geometry.rectangle(1.0, 1.0, bottom=both, top=both)
+
+    def test_cancelling_normals_of_prescribed_body_are_rejected(self) -> None:
+        """A prescribed body on opposite sides of the domain has no default direction either."""
+        both = PrescribedPlaten(displacement=Heaviside(1.0e-3, rise_time=1.0))
+        message = "The inward normals of the platen edges cancel out; give the PrescribedPlaten an explicit direction."
         with pytest.raises(ValueError, match=re.escape(message)):
             Geometry.rectangle(1.0, 1.0, bottom=both, top=both)
 
@@ -150,6 +166,34 @@ class TestBoundaryConditions:
         """A platen friction coefficient cannot be negative."""
         with pytest.raises(ValueError, match=re.escape("friction must be non-negative, got -1.0.")):
             LoadedPlaten(load=Heaviside(1.0), mass=1.0, friction=-1.0)
+
+    def test_smooth_prescribed_start_is_accepted(self) -> None:
+        """A sinusoid shifted to start from zero is a valid displacement history."""
+        spec = PrescribedPlaten(displacement=Sinusoidal(1.0e-3, 2.0, mean=1.0e-3, phase=-0.5 * math.pi))
+        assert_allclose(spec.displacement(0.25), 2.0e-3)
+
+    def test_prescribed_displacement_must_start_at_zero(self) -> None:
+        """A displacement history that does not start from zero would make the body jump, and must be rejected."""
+        message = "PrescribedPlaten displacement must be zero when loading starts, got 0.001 m."
+        with pytest.raises(ValueError, match=re.escape(message)):
+            PrescribedPlaten(displacement=Heaviside(1.0e-3))
+
+    def test_undefined_prescribed_start_is_rejected(self) -> None:
+        """A displacement history that is not a number when loading starts must be rejected."""
+        message = "PrescribedPlaten displacement must be zero when loading starts, got nan m."
+        with pytest.raises(ValueError, match=re.escape(message)):
+            PrescribedPlaten(displacement=lambda time: math.nan)
+
+    def test_negative_prescribed_friction_is_rejected(self) -> None:
+        """A prescribed platen friction coefficient cannot be negative."""
+        with pytest.raises(ValueError, match=re.escape("friction must be non-negative, got -1.0.")):
+            PrescribedPlaten(displacement=Heaviside(1.0e-3, rise_time=1.0), friction=-1.0)
+
+    def test_zero_prescribed_direction_is_rejected(self) -> None:
+        """A prescribed platen cannot move along a zero vector."""
+        message = "PrescribedPlaten direction must be a finite, non-zero (x, y) vector, got (0.0, 0.0)."
+        with pytest.raises(ValueError, match=re.escape(message)):
+            PrescribedPlaten(displacement=Heaviside(1.0e-3, rise_time=1.0), direction=(0.0, 0.0))
 
 
 class TestPlaten:
@@ -205,6 +249,46 @@ class TestPlaten:
         assert_allclose(platen.acceleration(1.0, np.array([0.0, -9.81])), (2.0 - 0.5) / 0.5)
         heavy = self._top_platen(self_weight=True)
         assert_allclose(heavy.acceleration(1.0, np.array([0.0, -9.81])), (2.0 + 0.5 * 9.81) / 0.5)
+
+    @staticmethod
+    def _prescribed_top_platen() -> Platen:
+        """Return a platen on the top edge of a unit box that comes down 0.1 per unit of time."""
+        spec = PrescribedPlaten(displacement=TimeHistory([0.0, 1.0], [0.0, 0.1]))
+        return Platen((2, ), spec, np.array([[1.0, 1.0]]), np.array([[0.0, 1.0]]), np.array([[0.0, -1.0]]))
+
+    def test_drive_follows_the_prescribed_displacement(self) -> None:
+        """A prescribed plate must move to its displacement at the end of the step, from where it was seated."""
+        platen = self._prescribed_top_platen()
+        assert platen.prescribed and not self._top_platen().prescribed
+        platen.seat(np.array([[0.5, 0.3]]), np.array([0.1]))
+        platen.activate()
+        platen.drive(0.5, 0.1)
+        assert_allclose(platen.displacement, 0.06)
+        assert_allclose(platen.offset, 0.6 + 0.06)
+        # the mean velocity over the step
+        assert_allclose(platen.velocity, (0.06 - 0.05) / 0.1)
+        assert_allclose(platen.starts[0, 1], 1.0 - 0.66)
+
+    def test_applied_load(self) -> None:
+        """A loaded plate applies its load, and a prescribed one, which has no mass, its reaction."""
+        loaded = self._top_platen()
+        loaded.reaction = 0.7
+        assert_allclose(loaded.applied_load(1.0), 2.0)
+        prescribed = self._prescribed_top_platen()
+        prescribed.reaction = 0.7
+        assert_allclose(prescribed.applied_load(1.0), 0.7)
+
+    def test_prescribed_plate_has_no_acceleration(self) -> None:
+        """A prescribed plate follows its path and has no equation of motion to accelerate it."""
+        message = "A PrescribedPlaten follows its displacement history and has no equation of motion."
+        with pytest.raises(TypeError, match=re.escape(message)):
+            self._prescribed_top_platen().acceleration(1.0, np.array([0.0, -9.81]))
+
+    def test_loaded_plate_cannot_be_driven(self) -> None:
+        """A loaded plate moves under its load and has no displacement history to follow."""
+        message = "A LoadedPlaten moves under its load and cannot be driven along a displacement."
+        with pytest.raises(TypeError, match=re.escape(message)):
+            self._top_platen().drive(0.5, 0.1)
 
 
 class TestLoadedPlatenDirection3D:

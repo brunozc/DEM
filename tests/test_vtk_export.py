@@ -14,7 +14,8 @@ import pytest
 from numpy.testing import assert_allclose
 
 from DEMcookies import (DEMSimulation, Geometry, Geometry3D, GlobalSettings, Heaviside, LoadedPlaten,
-                        MaterialProperties, Open, Particle, Particle3D, Wall, Water, generate_lattice_particles)
+                        MaterialProperties, Open, Particle, Particle3D, PrescribedPlaten, Wall, Water,
+                        generate_lattice_particles)
 from DEMcookies.shapes import ConvexPolygon, ConvexPolyhedron
 from DEMcookies.vtk_export import (OPEN_CODE, PARAVIEW_SCRIPT, PLATEN_CODE, SERIES, WALL_CODE, VTKWriter)
 
@@ -235,6 +236,22 @@ class TestVTKWriter:
         expected[[0, 2]] = np.abs(walls.force[:, 1]) / 0.01
         assert expected[2] > 0.5 / 0.01
         assert_allclose(arrays["CellData/pressure"], expected, rtol=1e-12, atol=1e-12)
+
+    def test_prescribed_lid_is_a_moving_platen(self, tmp_path: Path) -> None:
+        """A lid with a prescribed displacement must be written as a platen, where its displacement has moved it."""
+        lid = PrescribedPlaten(displacement=Heaviside(1.0e-4, rise_time=0.01))
+        sim = DEMSimulation(Geometry3D.box(0.1, 0.1, 0.1, top=lid),
+                            MATERIAL,
+                            particles=[Particle3D(0.05, 0.01, 0.04, 0.01)])
+        sim.rest(0.3)
+        sim.compress(0.02, record_every=20)
+        VTKWriter(str(tmp_path)).write(sim)
+        _, arrays = _last(tmp_path, "boundary")
+        assert arrays["CellData/condition"].tolist() == [
+            WALL_CODE, WALL_CODE, PLATEN_CODE, WALL_CODE, WALL_CODE, WALL_CODE
+        ]
+        assert_allclose(sim.platens[0].displacement, 1.0e-4, rtol=1e-12)
+        assert_allclose(arrays["Points/Points"][8:12], sim.platens[0].vertices[0], rtol=1e-15)
 
     def test_boundary_keeps_the_vertices_of_each_face(self, tmp_path: Path) -> None:
         """Faces with different numbers of vertices must keep theirs, without the padding, and open faces count."""
