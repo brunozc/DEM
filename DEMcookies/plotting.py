@@ -27,7 +27,7 @@ from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection  # typ
 from mpl_toolkits.mplot3d.axes3d import Axes3D  # type: ignore[import-untyped]
 from PIL import Image
 
-from .boundary import LoadedPlaten, Open
+from .boundary import PLATEN_CONDITIONS, LoadedPlaten, Open
 from .geometry import Geometry
 from .geometry3d import Geometry3D
 from .solver import DEMSimulation, Frame
@@ -312,7 +312,7 @@ class _FramePainter:
         for start, end, condition in zip(geometry.edge_starts, geometry.edge_ends, geometry.boundary_conditions):
             if isinstance(condition, Open):
                 self.ax.plot(*zip(start, end), color="0.6", lw=1, ls="--")
-            elif not isinstance(condition, LoadedPlaten):
+            elif not isinstance(condition, PLATEN_CONDITIONS):
                 self.ax.plot(*zip(start, end), color="k", lw=2)
         self.bodies = [LineCollection([], colors="firebrick", linewidths=4) for _ in sim.platens]
         for body in self.bodies:
@@ -429,7 +429,7 @@ class _SectionPainter:
             for start, end in _plane_crossings(vertices[list(face)], 2, section):
                 if isinstance(condition, Open):
                     self.ax.plot(*zip(start[:2], end[:2]), color="0.6", lw=1, ls="--")
-                elif not isinstance(condition, LoadedPlaten):
+                elif not isinstance(condition, PLATEN_CONDITIONS):
                     self.ax.plot(*zip(start[:2], end[:2]), color="k", lw=2)
         self.bodies = [LineCollection([], colors="firebrick", linewidths=4) for _ in sim.platens]
         for body in self.bodies:
@@ -553,7 +553,7 @@ class _FramePainter3D:
         vertices = geometry.vertices
         walls = [
             vertices[list(face)] for face, condition in zip(geometry.faces, geometry.boundary_conditions)
-            if not isinstance(condition, (Open, LoadedPlaten))
+            if not isinstance(condition, (Open, *PLATEN_CONDITIONS))
         ]
         openings = [
             vertices[list(face)] for face, condition in zip(geometry.faces, geometry.boundary_conditions)
@@ -833,9 +833,10 @@ def render_frame(sim: DEMSimulation,
 
 
 def plot_load_curves(sim: DEMSimulation, path: str) -> None:
-    """Plot the applied load and reaction against time and the reaction against displacement of every loaded body.
+    """Plot the applied load and reaction against time and the reaction against displacement of every moving body.
 
     For a body with self weight the load plus the weight is drawn as well, since that is what the reaction balances.
+    For a body with a prescribed displacement, the reaction and the displacement are drawn against time instead.
 
     Args:
         sim: simulation whose load curves are plotted.
@@ -856,15 +857,24 @@ def plot_load_curves(sim: DEMSimulation, path: str) -> None:
         time, applied, displacement, reaction = curve.as_array().T
         label = _facet_label(curve.edges, sim.geometry.facet_name)
         body = bodies[curve.edges]
-        ax_time.plot(time, applied, label="applied load F(t)")
-        if body.spec.self_weight:
-            weight = body.spec.mass * float(gravity @ body.direction)
-            ax_time.plot(time, applied + weight, ":", color="0.3", label="applied load + weight")
-        ax_time.plot(time, reaction, "--", label="contact reaction")
+        spec = body.spec
+        if isinstance(spec, LoadedPlaten):
+            ax_time.plot(time, applied, label="applied load F(t)")
+            if spec.self_weight:
+                weight = spec.mass * float(gravity @ body.direction)
+                ax_time.plot(time, applied + weight, ":", color="0.3", label="applied load + weight")
+            ax_time.plot(time, reaction, "--", label="contact reaction")
+            ax_time.set_title(f"Body on {label}: load history")
+            ax_time.legend()
+        else:
+            lines = ax_time.plot(time, reaction, label="contact reaction")
+            ax_path = ax_time.twinx()
+            lines += ax_path.plot(time, displacement * 1e3, ":", color="0.3", label="prescribed displacement u(t)")
+            ax_path.set_ylabel("displacement [mm]")
+            ax_time.set_title(f"Body on {label}: displacement history")
+            ax_time.legend(lines, [line.get_label() for line in lines])
         ax_time.set_xlabel("loading time [s]")
         ax_time.set_ylabel("force [N]")
-        ax_time.set_title(f"Body on {label}: load history")
-        ax_time.legend()
         ax_time.grid(alpha=0.3)
 
         ax_displacement.plot(displacement * 1e3, reaction)

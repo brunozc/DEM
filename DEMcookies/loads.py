@@ -1,7 +1,8 @@
-"""Time functions F(t) for the load applied by a loaded platen.
+"""Time functions F(t) for the load applied by a loaded platen, or u(t) for the displacement of a prescribed one.
 
 Every load is a callable that maps the time since loading started [s] to a force [N]. A positive force pushes the
-platen into the domain. Besides the classes below, any plain function with that signature can be used.
+platen into the domain. Besides the classes below, any plain function with that signature can be used. The same
+classes describe the displacement history of a ``PrescribedPlaten``, in metres instead of newtons.
 """
 
 import math
@@ -11,6 +12,7 @@ from typing import Callable, Sequence, Tuple
 import numpy as np
 
 LoadFunction = Callable[[float], float]
+DisplacementFunction = Callable[[float], float]
 
 
 @dataclass(frozen=True)

@@ -34,7 +34,7 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import numpy.typing as npt
 
-from .boundary import LoadedPlaten, Open
+from .boundary import PLATEN_CONDITIONS, Open
 from .geometry3d import Geometry3D
 from .polytopes import frame_polygons
 from .solver import ContactList, DEMSimulation
@@ -487,7 +487,7 @@ def _boundary_data(sim: DEMSimulation, walls: ContactList) -> _PolyData:
     force = -scatter_add(walls.second, walls.force, geometry.n_facets)
     pressure = -np.einsum("ij,ij->i", force, geometry.inward_normals) / geometry.facets.measures
     condition = [
-        OPEN_CODE if isinstance(c, Open) else PLATEN_CODE if isinstance(c, LoadedPlaten) else WALL_CODE
+        OPEN_CODE if isinstance(c, Open) else PLATEN_CODE if isinstance(c, PLATEN_CONDITIONS) else WALL_CODE
         for c in geometry.boundary_conditions
     ]
     data: Dict[str, DataArray] = {

@@ -17,6 +17,10 @@ MIN_RESTITUTION = 1.0e-4
 # Relative tolerance for geometric tests, scaled by the size of the domain.
 GEOMETRY_TOLERANCE = 1.0e-9
 
+# Largest displacement [m] that a prescribed displacement history may have when loading starts. A larger one would
+# make the body jump into the packing in a single time step.
+PRESCRIBED_START_TOLERANCE = 1.0e-12
+
 # Largest distance of a vertex of a face of a polyhedron from the plane of the face, relative to the size of the
 # domain. It is looser than the geometric tolerance, so that faces whose vertices were rounded on input are accepted.
 PLANARITY_TOLERANCE = 1.0e-6

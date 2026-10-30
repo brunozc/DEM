@@ -776,6 +776,26 @@ The rise time, or the time scale of any other history, must be long compared
 with the characteristic contact time~\eqref{eq:tc}, otherwise the response is
 dynamic rather than quasi-static.
 
+\subsection{Displacement-controlled bodies}
+\label{sec:prescribed-platen}
+
+A \texttt{PrescribedPlaten} is a body of the same kind whose translation is prescribed rather than found from~\eqref{eq:platen-eom}.
+Its displacement $u(t)$, in \unit{\metre}, is a function of the load clock and is given by any of the histories above.
+The displacement is measured from the seated position, so
+\begin{equation}
+  s_{p}(t) = s_{p}^{0} + u(t),
+  \qquad
+  v_{p}(t) = \dot u(t),
+  \label{eq:prescribed-platen}
+\end{equation}
+whatever the particles push back with: the loading is \emph{displacement-controlled}.
+The body has no mass, so the force that moves it along its path equals the reaction $F_{p}$ of~\eqref{eq:platen-reaction}, and the load curve records it as both the applied load and the reaction.
+The history must start from $u(0)=0$, otherwise the body would jump into the packing in the first time step.
+A sinusoid whose mean equals its amplitude, with $\varphi=-\pi/2$, starts smoothly from zero, as it does for a load.
+A body that is drawn back faster than the packing rebounds loses contact, and $F_{p}$ drops to zero.
+Under cyclic displacement control the settlement of the packing is imposed rather than measured.
+As the packing compacts, the reaction needed to reach the same displacement falls, so such a test measures the relaxation of the force and the evolution of the stiffness rather than the accumulation of settlement.
+
 \section{Pore water}
 \label{sec:water}
 

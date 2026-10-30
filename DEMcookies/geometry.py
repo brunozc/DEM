@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import numpy.typing as npt
 
-from .boundary import BoundaryCondition, LoadedPlaten, Open, Wall, resolve_direction
+from .boundary import PLATEN_CONDITIONS, BoundaryCondition, Open, PlatenCondition, Wall, resolve_direction
 from .facets import SegmentFacets
 from .globals import GEOMETRY_TOLERANCE
 from .segments import project_onto_segments
@@ -85,8 +85,9 @@ class Geometry:
 
     Edge ``k`` runs from vertex ``k`` to vertex ``k + 1`` (the last edge closes the polygon back to vertex 0) and
     carries ``boundary_conditions[k]``. The vertices may be given in either orientation. To apply a load to part of
-    a side only, split that side into several collinear edges and make the middle one a ``LoadedPlaten``. Edges that
-    carry the same ``LoadedPlaten`` object form one rigid body, which can have any polyline shape.
+    a side only, split that side into several collinear edges and make the middle one a ``LoadedPlaten``, or a
+    ``PrescribedPlaten`` to prescribe its displacement instead. Edges that carry the same platen object form one
+    rigid body, which can have any polyline shape.
     """
 
     def __init__(self, vertices: Sequence[Sequence[float]], boundary_conditions: Sequence[BoundaryCondition]) -> None:
@@ -144,9 +145,9 @@ class Geometry:
         self.__normals = orientation * np.column_stack((-self.__tangents[:, 1], self.__tangents[:, 0]))
         self.__check_simple(GEOMETRY_TOLERANCE * size)
 
-        bodies: Dict[LoadedPlaten, List[int]] = {}
+        bodies: Dict[PlatenCondition, List[int]] = {}
         for k, condition in enumerate(self.__boundary_conditions):
-            if isinstance(condition, LoadedPlaten):
+            if isinstance(condition, PLATEN_CONDITIONS):
                 bodies.setdefault(condition, []).append(k)
         self.__platen_groups = tuple((spec, tuple(edges)) for spec, edges in bodies.items())
         for spec, edges in self.__platen_groups:
@@ -243,8 +244,8 @@ class Geometry:
         return self.__normals.copy()
 
     @property
-    def platen_groups(self) -> Tuple[Tuple[LoadedPlaten, Tuple[int, ...]], ...]:
-        """Each loaded body with the indices of its edges, ordered by their first edge."""
+    def platen_groups(self) -> Tuple[Tuple[PlatenCondition, Tuple[int, ...]], ...]:
+        """Each moving body with the indices of its edges, ordered by their first edge."""
         return self.__platen_groups
 
     @property

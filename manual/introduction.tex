@@ -152,7 +152,9 @@ splitting the top side into collinear edges and loading only the middle one
 (Section~\ref{sec:walls}).  A platen may also span several edges with different
 orientations, which then move as one rigid body, so a load can be applied
 through a wedge or a curved indenter rather than along a straight line
-(Section~\ref{sec:platen}).  Finally, the particles can be immersed in water
+(Section~\ref{sec:platen}).
+A platen can instead follow a prescribed displacement history, which makes the loading displacement-controlled (Section~\ref{sec:prescribed-platen}).
+Finally, the particles can be immersed in water
 below a water table, which may rise or fall with time, and an upward or
 downward seepage flow can be imposed through them.  The water acts on the
 particles through buoyancy and porosity-dependent drag, and, if requested, an
@@ -193,8 +195,8 @@ manual (Table~\ref{tab:modules}).
       vector operations shared by 2D and 3D &
       Section~\ref{sec:3d-numerics} \\
     \texttt{boundary.py}, \texttt{segments.py} &
-      \texttt{Wall}, \texttt{Open}, \texttt{LoadedPlaten}, \texttt{Platen} &
-      Sections~\ref{sec:walls}--\ref{sec:platen} \\
+      \texttt{Wall}, \texttt{Open}, \texttt{LoadedPlaten}, \texttt{PrescribedPlaten}, \texttt{Platen} &
+      Sections~\ref{sec:walls}--\ref{sec:prescribed-platen} \\
     \texttt{loads.py} &
       \texttt{Pulse}, \texttt{Heaviside}, \texttt{Sinusoidal},
       \texttt{TimeHistory} &
@@ -346,6 +348,7 @@ Table~\ref{tab:notation} collects the symbols used throughout the manual.
     $u_{p},\ F_{p}$  & platen displacement, reaction    & \unit{\metre}, \unit{\newton} & \texttt{platen.displacement}, \texttt{.reaction} \\
     $m_{p}$          & platen mass                      & \unit{\kilogram}     & \texttt{LoadedPlaten.mass} \\
     $F(t)$           & prescribed external load         & \unit{\newton}       & \texttt{LoadedPlaten.load} \\
+    $u(t)$           & prescribed platen displacement   & \unit{\metre}        & \texttt{PrescribedPlaten.displacement} \\
     $\Delta t$       & time step                        & \unit{\second}       & \texttt{sim.dt} \\
     $T_{R}$          & Rayleigh critical time step      & \unit{\second}       & \texttt{rayleigh\_time\_step} \\
     $y_{w}$          & water table height               & \unit{\metre}        & \texttt{Water.level} \\

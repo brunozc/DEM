@@ -14,7 +14,7 @@ from numpy.testing import assert_allclose
 from PIL import GifImagePlugin, Image
 
 from DEMcookies import (DEMSimulation, Geometry, Geometry3D, Heaviside, LoadedPlaten, MaterialProperties, Open,
-                        Particle, Particle3D, Wall, Water)
+                        Particle, Particle3D, PrescribedPlaten, Wall, Water)
 from DEMcookies.plotting import (_chain_loops, _clip_below, _current_outline, _current_polyhedron, _facet_label,
                                  _plane_crossings, _sections, plot_load_curves, render_animation, render_frame)
 from DEMcookies.shapes import ConvexPolygon, ConvexPolyhedron
@@ -122,6 +122,18 @@ class TestPlotting:
         """The load curves of a platen with self weight, which add the weight line, must be written."""
         plot_load_curves(_loaded_simulation(self_weight=True), str(tmp_path / "curves.png"))
         assert (tmp_path / "curves.png").stat().st_size > 0
+
+    def test_outputs_of_prescribed_platen_are_written(self, tmp_path: Path) -> None:
+        """A platen with a prescribed displacement must be drawn, and its displacement history plotted."""
+        platen = PrescribedPlaten(displacement=Heaviside(1.0e-4, rise_time=0.01))
+        sim = DEMSimulation(Geometry.rectangle(0.05, 0.05, top=platen),
+                            MATERIAL,
+                            particles=[Particle(0.025, 0.01, 0.01)])
+        sim.compress(0.02, record_every=20)
+        render_frame(sim, str(tmp_path / "last.png"))
+        plot_load_curves(sim, str(tmp_path / "curves.png"))
+        for name in ("last.png", "curves.png"):
+            assert (tmp_path / name).stat().st_size > 0
 
     def test_animation_without_frames_is_rejected(self, tmp_path: Path) -> None:
         """A simulation that has not run has nothing to animate."""

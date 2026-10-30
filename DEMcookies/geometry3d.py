@@ -12,7 +12,7 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import numpy.typing as npt
 
-from .boundary import BoundaryCondition, LoadedPlaten, Open, Wall, resolve_body_direction
+from .boundary import PLATEN_CONDITIONS, BoundaryCondition, Open, PlatenCondition, Wall, resolve_body_direction
 from .facets import PolygonFacets
 from .geometry import Geometry
 from .globals import GEOMETRY_TOLERANCE, PLANARITY_TOLERANCE, QUERY_CHUNK_SIZE
@@ -29,7 +29,8 @@ class Geometry3D:
     seen from outside; either orientation is accepted. A vertex that lies on an edge of a neighbouring face must
     therefore be one of the vertices of that face too. Faces need not be convex, and consecutive edges of a face may
     be collinear. To apply a load to part of a side only, split that side into several coplanar faces and make one
-    of them a ``LoadedPlaten``. Faces that carry the same ``LoadedPlaten`` object form one rigid body.
+    of them a ``LoadedPlaten``, or a ``PrescribedPlaten`` to prescribe its displacement instead. Faces that carry
+    the same platen object form one rigid body.
     """
 
     def __init__(self, vertices: Sequence[Sequence[float]], faces: Sequence[Sequence[int]],
@@ -105,9 +106,9 @@ class Geometry3D:
                                                     len(face) - 1)]).reshape(-1, 3, 3)
         self.__check_simple(neighbours, tolerance)
 
-        bodies: Dict[LoadedPlaten, List[int]] = {}
+        bodies: Dict[PlatenCondition, List[int]] = {}
         for k, condition in enumerate(self.__boundary_conditions):
-            if isinstance(condition, LoadedPlaten):
+            if isinstance(condition, PLATEN_CONDITIONS):
                 bodies.setdefault(condition, []).append(k)
         self.__platen_groups = tuple((spec, tuple(indices)) for spec, indices in bodies.items())
         for spec, indices in self.__platen_groups:
@@ -171,8 +172,8 @@ class Geometry3D:
 
         Side face ``k`` is swept by edge ``k`` of the polygon and carries its boundary condition, so the faces of
         the prism are numbered like the edges of the polygon, followed by the back face (at ``z_back``) and the front
-        face. A ``LoadedPlaten`` with an explicit 2D direction (x, y) is replaced by a copy with the direction
-        (x, y, 0); edges that shared one body still share one.
+        face. A ``LoadedPlaten`` or ``PrescribedPlaten`` with an explicit 2D direction (x, y) is replaced by a copy
+        with the direction (x, y, 0); edges that shared one body still share one.
 
         Args:
             geometry: polygonal domain in the x-y plane.
@@ -196,10 +197,10 @@ class Geometry3D:
         faces: List[Tuple[int, ...]] = [(k, (k + 1) % m, m + (k + 1) % m, m + k) for k in range(m)]
         faces.append(tuple(range(m - 1, -1, -1)))
         faces.append(tuple(range(m, 2 * m)))
-        bodies: Dict[LoadedPlaten, LoadedPlaten] = {}
+        bodies: Dict[PlatenCondition, PlatenCondition] = {}
         conditions: List[BoundaryCondition] = []
         for condition in geometry.boundary_conditions:
-            if isinstance(condition, LoadedPlaten) and condition.direction is not None:
+            if isinstance(condition, PLATEN_CONDITIONS) and condition.direction is not None:
                 if condition not in bodies:
                     bodies[condition] = dataclasses.replace(condition, direction=(*condition.direction, 0.0))
                 condition = bodies[condition]
@@ -258,8 +259,8 @@ class Geometry3D:
         return self.__normals.copy()
 
     @property
-    def platen_groups(self) -> Tuple[Tuple[LoadedPlaten, Tuple[int, ...]], ...]:
-        """Each loaded body with the indices of its faces, ordered by their first face."""
+    def platen_groups(self) -> Tuple[Tuple[PlatenCondition, Tuple[int, ...]], ...]:
+        """Each moving body with the indices of its faces, ordered by their first face."""
         return self.__platen_groups
 
     @property

@@ -394,6 +394,16 @@ in~\eqref{eq:cn}.  A practical rule is $m_{p}\gtrsim 10\,m_{\max}$; the
 reference case uses $m_{p}=\qty{0.5}{\kilogram}$ against
 $m_{\max}=\qty{0.084}{\kilogram}$.
 
+A displacement-controlled body (Section~\ref{sec:prescribed-platen}) skips both half kicks.
+The drift moves it straight to $s_{p}^{\,n+1}=s_{p}^{0}+u(t^{n+1})$ and gives it the mean velocity of the step,
+\begin{equation}
+  v_{p}^{\,n+1/2} = \frac{u(t^{n+1})-u(t^{n})}{\Delta t},
+  \label{eq:prescribed-velocity}
+\end{equation}
+which to second order is the velocity half way through the step, the instant whose velocities the particles have when the contact forces are evaluated.
+The body has no mass, so it adds no stability restriction to $\Delta t$.
+Nothing limits how fast it moves, however, so the time scale of $u(t)$ must be long compared with the contact time~\eqref{eq:tc}, otherwise the body presses deep into the packing within a few steps and the response is dynamic rather than quasi-static.
+
 The edges of a loaded body are stored with the walls as solid edges; at every
 evaluation they are shifted by $s_{p}\mathbf{d}_{p}$ and given the velocity
 $v_{p}\mathbf{d}_{p}$, and the reactions of all their contacts are summed into

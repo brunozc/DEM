@@ -3,8 +3,9 @@
 ``VelocityVerlet`` is a small, self-contained integrator used to verify the scheme. ``DEMSimulation`` is the full
 engine: it keeps the particle state in arrays, finds particle contacts with a cell grid and a Verlet neighbour list,
 evaluates the Hertz-Mindlin forces between particles and against the solid facets of the domain, moves the loaded
-platens, and advances everything in time with velocity Verlet. It runs in two or in three dimensions, as set by the
-geometry: a polygon (``Geometry``) or a polyhedron (``Geometry3D``).
+platens under their loads and the prescribed ones along their paths, and advances everything in time with velocity
+Verlet. It runs in two or in three dimensions, as set by the geometry: a polygon (``Geometry``) or a polyhedron
+(``Geometry3D``).
 
 The particles are spheres, or convex polygons (2D) and polyhedra (3D), in any mix. A contact between two spheres, or
 between a sphere and a facet, follows from the overlap of the spheres; a contact that involves a polytope follows
@@ -138,7 +139,7 @@ class Frame:
         positions: particle centres, shape (n, d) [m].
         radii: particle radii [m].
         speeds: particle speeds [m/s].
-        platens: current facets of every loaded body, each of shape (k, m, d) holding the m vertices of its k
+        platens: current facets of every moving body, each of shape (k, m, d) holding the m vertices of its k
             facets: the start and end point of each edge in 2D, and the vertices of each face, padded with copies
             of its last vertex, in 3D [m].
         phase: name of the stage the frame belongs to.
@@ -186,12 +187,13 @@ class Frame:
 
 @dataclass
 class LoadCurve:
-    """Load history recorded for one loaded body.
+    """Load history recorded for one moving body, loaded or with a prescribed displacement.
 
     Attributes:
         edges: indices of the geometry facets of the body, edges in 2D and faces in 3D; ``faces`` is the same tuple.
         time: time since loading started [s].
-        applied: applied load [N].
+        applied: applied load [N]; for a body with a prescribed displacement, the force that moves it along its path,
+            which is the reaction.
         displacement: translation of the body along its direction of motion since loading started [m].
         reaction: contact force with which the particles push the body back, against its direction of motion [N].
     """
@@ -300,9 +302,9 @@ class DEMSimulation:
         porosity: local volume porosity at each particle, computed only when there is water (NaN otherwise).
         edge_forces: force the particles exert on each facet of the geometry, an edge in 2D or a face in 3D, shape
             (facets, d) [N]; ``face_forces`` is the same array.
-        platens: runtime state of every loaded body.
+        platens: runtime state of every moving body, loaded or prescribed.
         frames: recorded snapshots.
-        load_curves: recorded load history of every loaded body.
+        load_curves: recorded load history of every moving body.
         time: simulation time [s].
         dt: time step [s].
     """
@@ -508,7 +510,7 @@ class DEMSimulation:
         for s, (_, condition) in enumerate(solid):
             friction[s] = self.material.friction if condition.friction is None else condition.friction
 
-        # every loaded body moves all of its facets, which may be any subset of the solid facets
+        # every moving body moves all of its facets, which may be any subset of the solid facets
         self.platens: List[Platen] = []
         self.__platen_slot_groups: List[npt.NDArray[np.int64]] = []
         platen_of_slot = np.full(len(solid), -1, dtype=np.int64)
@@ -1297,7 +1299,7 @@ class DEMSimulation:
         return _ContactBatch(particle, facet, normal, measure / size, forces, twisting, point, (lever, None))
 
     def __seat_points(self) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-        """Return the points that a loaded body is seated on: the spheres, and the vertices of the polytopes.
+        """Return the points that a moving body is seated on: the spheres, and the vertices of the polytopes.
 
         Returns:
             The points, shape (k, d) [m], and their radii, zero for a vertex [m].
@@ -1428,18 +1430,22 @@ class DEMSimulation:
         dt = self.dt
         half = 0.5 * dt
         active = [p for p in self.platens if p.active]
+        loaded = [p for p in active if not p.prescribed]
 
         # first half kick, with the forces of the previous evaluation
         self.__kick(half)
         self.__spin(half)
-        for platen in active:
+        for platen in loaded:
             platen.velocity += half * platen.acceleration(self.load_time, self.__gravity)
 
-        # drift
+        # drift; a prescribed body goes straight to its position at the end of the step
         self.pos += dt * self.vel
         self.__turn(dt)
         for platen in active:
-            platen.offset += dt * platen.velocity
+            if platen.prescribed:
+                platen.drive(self.load_time, dt)
+            else:
+                platen.offset += dt * platen.velocity
         self.time += dt
         self.steps_taken += 1
         if active:
@@ -1452,7 +1458,7 @@ class DEMSimulation:
         # second half kick, with the new forces
         self.__kick(half)
         self.__spin(half)
-        for platen in active:
+        for platen in loaded:
             platen.velocity += half * platen.acceleration(self.load_time, self.__gravity)
         for observer in self.__observers:
             observer(self)
@@ -1517,7 +1523,7 @@ class DEMSimulation:
         """Append the current state of every platen to its load curve."""
         for platen, curve in zip(self.platens, self.load_curves):
             curve.time.append(self.load_time)
-            curve.applied.append(platen.spec.load(self.load_time))
+            curve.applied.append(platen.applied_load(self.load_time))
             curve.displacement.append(platen.displacement)
             curve.reaction.append(platen.reaction)
 
@@ -1696,18 +1702,19 @@ class DEMSimulation:
                 self.__record_frame(phase)
 
     def seat_platens(self) -> None:
-        """Lower every loaded body with ``seat_on_bed`` onto the packing, and hold it there without releasing it.
+        """Lower every moving body with ``seat_on_bed`` onto the packing, and hold it there without releasing it.
 
         Seating a body before the domain is full lets particles be rained around it afterwards, e.g. into the cribs
         between railway sleepers, which would otherwise block it on its way down. The body stays fixed, and the load
         clock stopped, until ``compress`` releases it.
 
         Raises:
-            ValueError: if the geometry has no loaded platen.
+            ValueError: if the geometry has no loaded or prescribed platen.
             ValueError: if loading has already started.
         """
         if not self.platens:
-            raise ValueError(f"The geometry has no LoadedPlaten {self.geometry.facet_name} to seat.")
+            raise ValueError(f"The geometry has no LoadedPlaten or PrescribedPlaten {self.geometry.facet_name} to "
+                             f"seat.")
         if any(p.active for p in self.platens):
             raise ValueError("Loading has already started; a released platen cannot be seated again.")
         for platen in self.platens:
@@ -1716,22 +1723,23 @@ class DEMSimulation:
         self.__forces_valid = False
 
     def compress(self, duration: float, record_every: int = 40) -> None:
-        """Apply the loads of the loaded platens for a given time.
+        """Apply the loads of the loaded platens, and the displacements of the prescribed ones, for a given time.
 
         On the first call every platen is seated on the packing (if its ``seat_on_bed`` is set) and released, and
-        the load clock starts from zero. Later calls continue the same load history.
+        the load clock starts from zero. Later calls continue the same load and displacement histories.
 
         Args:
             duration: time to simulate [s].
             record_every: number of time steps between two recorded frames and load curve points.
 
         Raises:
-            ValueError: if the geometry has no loaded platen.
+            ValueError: if the geometry has no loaded or prescribed platen.
             ValueError: if the duration is negative.
             ValueError: if record_every is not positive.
         """
         if not self.platens:
-            raise ValueError(f"The geometry has no LoadedPlaten {self.geometry.facet_name} to apply a load with.")
+            raise ValueError(f"The geometry has no LoadedPlaten or PrescribedPlaten {self.geometry.facet_name} to "
+                             f"apply a load with.")
         steps = self.__steps_for(duration)
         _check_record_every(record_every)
         if not any(p.active for p in self.platens):
