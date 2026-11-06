@@ -70,7 +70,7 @@ from ballast_cyclic_3d import (AMPLITUDE, CASES, CYCLES, FREQUENCY, GRAINS, PACK
                                RAIL_SEAT, REST_TIME, SAMPLES_PER_CYCLE, SAVE_EVERY_N_STEPS, SNAPSHOT_CYCLES, LoadRun,
                                LoadSettings, case_dir, load_pickle, packing_dir, paraview_writer, per_cycle,
                                pressure_points, record_sample, resume_paraview, save_pickle, save_results, sleeper_base,
-                               sleeper_uplift, start_run, water_level)
+                               sleeper_spec, sleeper_uplift, start_run, water_level)
 from ballast_cyclic_3d import OUTPUT_DIR as DEPOSIT_DIR
 from ballast_cyclic_3d import OUTPUT_DIRS as DEPOSIT_DIRS
 from DEMcookies import DEMSimulation, Water
@@ -345,7 +345,7 @@ def flood(preloaded: StagedRun, case: str, settings: LoadSettings, paraview: Opt
     if load.water_level is not None:
         sim.set_water(Water(level=load.water_level, coupled=settings.coupled))
     load.uplift = sleeper_uplift(sim, load.water_level)
-    platen.spec = dataclasses.replace(platen.spec,
+    platen.spec = dataclasses.replace(sleeper_spec(sim),
                                       load=FloodedLoad(settings.amplitude, settings.frequency, run.time_origin,
                                                        load.uplift))
     for sample in range(FLOOD_SAMPLES):

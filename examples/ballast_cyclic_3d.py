@@ -315,6 +315,24 @@ def sleeper_base(sim: DEMSimulation) -> float:
     return float(sim.platens[0].vertices[..., 1].min())
 
 
+def sleeper_spec(sim: DEMSimulation) -> LoadedPlaten:
+    """Return the boundary condition of the sleeper, which this study loads rather than displaces.
+
+    Args:
+        sim: simulation with the sleeper.
+
+    Returns:
+        The boundary condition of the sleeper.
+
+    Raises:
+        TypeError: if the sleeper follows a prescribed displacement.
+    """
+    spec = sim.platens[0].spec
+    if not isinstance(spec, LoadedPlaten):
+        raise TypeError(f"The sleeper must be a LoadedPlaten, got a {type(spec).__name__}.")
+    return spec
+
+
 def sleeper_footprint(sim: DEMSimulation) -> Tuple[float, float, float]:
     """Return the x coordinates of the sides of the sleeper and its length from the centreline [m]."""
     vertices = sim.platens[0].vertices.reshape(-1, 3)
@@ -545,7 +563,7 @@ def start_run(sim: DEMSimulation,
     uplift = sleeper_uplift(sim, level)
     platen = sim.platens[0]
     # the deposited packing is shared by every load, so the sleeper only gets the load of the run now
-    platen.spec = dataclasses.replace(platen.spec, load=sleeper_load(settings, uplift))
+    platen.spec = dataclasses.replace(sleeper_spec(sim), load=sleeper_load(settings, uplift))
     run = LoadRun(sim,
                   case,
                   packing,
@@ -573,7 +591,7 @@ def record_sample(run: LoadRun, displacement: Optional[float] = None) -> None:
     sim = run.sim
     platen = sim.platens[0]
     run.time.append(sim.load_time)
-    run.applied.append(platen.spec.load(sim.load_time))
+    run.applied.append(platen.applied_load(sim.load_time))
     run.displacement.append(platen.displacement if displacement is None else displacement)
     run.reaction.append(platen.reaction)
     run.face_forces.append(sim.face_forces.copy())
@@ -634,7 +652,7 @@ def save_results(run: LoadRun, path: str, extra: Optional[Dict[str, npt.NDArray[
         "crib_top": np.array(run.crib_top),
         "buoyancy": np.array(run.buoyancy),
         "uplift": np.array(run.uplift),
-        "sleeper_mass": np.array(sim.platens[0].spec.mass),
+        "sleeper_mass": np.array(sleeper_spec(sim).mass),
         "sleeper_footprint": np.array([left, right, length]),
         "box": np.array(high - low),
         "rail_seat": np.array(RAIL_SEAT),
