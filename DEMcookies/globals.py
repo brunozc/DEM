@@ -58,6 +58,11 @@ COPLANAR_TOLERANCE = 1.0e-6
 # boxes do, would otherwise both bound the overlap; the growth leaves one of them inside the other body.
 OVERLAP_TIE_BREAK = 1.0e-9
 
+# Largest distance, relative to the size of the boundary of an overlap of polytopes, by which its computed centroid may
+# lie beyond a plane of either body. The centroid of a convex overlap lies inside both bodies; one computed beyond them
+# comes from rounding in a thin overlap, and the mean of the ends of the pieces of its boundary takes its place.
+CENTROID_TOLERANCE = 1.0e-6
+
 # Moment of inertia of a sphere about its centre over m R^2.
 SPHERE_INERTIA_FACTOR = 0.4
 
