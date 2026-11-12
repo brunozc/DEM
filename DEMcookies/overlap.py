@@ -20,6 +20,13 @@ A face of one body may lie in the plane of a face of the other, as the tops of t
 the overlap on that plane would then be counted from both faces. Body j, or the region, is therefore grown by a
 relative amount of the order of the rounding error before its overlap is measured, which leaves the face of body i
 alone on that plane and changes nothing else measurably.
+
+The simplices are spanned from the mean of the ends of the pieces, which lies inside the convex overlap, so that they
+are of the size of the overlap rather than of the bodies. A thin overlap, where a corner of one body grazes a face of
+the other or two faces lie nearly flat on each other, is still measured to the rounding of the ends of its pieces
+only, and its centroid, its first moment over a vanishing area or volume, can come out anywhere. A centroid computed
+beyond a plane of either body is therefore replaced by that mean of the ends, which bounds the contact point, and with
+it the lever of the contact force, by the overlap itself.
 """
 
 from dataclasses import dataclass, replace
@@ -30,11 +37,13 @@ import numpy as np
 import numpy.typing as npt
 
 from .backend import array_module, quiet
-from .globals import OVERLAP_TIE_BREAK, PARALLEL_PLANES_TOLERANCE
+from .globals import CENTROID_TOLERANCE, OVERLAP_TIE_BREAK, PARALLEL_PLANES_TOLERANCE
 from .vectors import cross_3d, scatter_add
 
 # a piece of the boundary of an overlap: contact of each piece, its start and end point, and the plane it lies on
 _Pieces = Tuple[npt.NDArray[np.int64], npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.int64]]
+# parts of the boundary of planar overlaps: start and end of each part, and whether it lies inside the overlap at all
+_Parts = Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.bool_]]
 
 
 @dataclass(frozen=True, eq=False)
@@ -180,7 +189,7 @@ def _cross_2d(a: npt.NDArray[np.float64], b: npt.NDArray[np.float64]) -> npt.NDA
 
 
 def _segment_parts(vertices: npt.NDArray[np.float64], normals: npt.NDArray[np.float64],
-                   offsets: npt.NDArray[np.float64]) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+                   offsets: npt.NDArray[np.float64]) -> _Parts:
     """Parts of the edges of polygons that lie inside sets of half-planes.
 
     Args:
@@ -190,37 +199,75 @@ def _segment_parts(vertices: npt.NDArray[np.float64], normals: npt.NDArray[np.fl
 
     Returns:
         The start and the end of the part of each edge inside, both zero for an edge that lies outside, shape
-        (k, v, 2) each [m].
+        (k, v, 2) each [m], and whether each edge has a part inside, shape (k, v).
     """
     xp = array_module(vertices)
     edge = xp.roll(vertices, -1, axis=1) - vertices
     t0, t1, inside = clip_lines(vertices, edge, normals[:, None], offsets[:, None], 0.0, 1.0)
     start = xp.where(inside[..., None], vertices + t0[..., None] * edge, 0.0)
     end = xp.where(inside[..., None], vertices + t1[..., None] * edge, 0.0)
-    return start, end
+    return start, end, inside
 
 
-def _planar_overlap(
-    origin: npt.NDArray[np.float64], parts: List[Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]]
-) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-    """Area and centroid of planar regions from the counter-clockwise pieces of their boundaries.
+def _checked_centroid(origin: npt.NDArray[np.float64], anchor: npt.NDArray[np.float64], offset: npt.NDArray[np.float64],
+                      measure: npt.NDArray[np.float64], spread: npt.NDArray[np.float64],
+                      normals: npt.NDArray[np.float64], offsets: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """Centroid of overlaps, or the mean of the ends of the pieces of their boundaries where it lies beyond them.
+
+    The centroid of a convex overlap lies inside every plane of both bodies. One computed beyond a plane by more than
+    the tolerance comes from rounding in a thin overlap, and the mean of the ends, which lies inside, replaces it.
 
     Args:
-        origin: reference point of each region, against which the pieces are given, shape (k, 2) [m].
-        parts: start and end points of pieces of the boundaries, shape (k, ..., 2) each [m].
+        origin: reference point of each overlap, shape (k, d) [m].
+        anchor: mean of the ends of the pieces of the boundary of each overlap, relative to the reference point,
+            shape (k, d) [m].
+        offset: computed centroid of each overlap relative to its anchor, shape (k, d) [m].
+        measure: computed area (2D) or volume (3D) of each overlap, shape (k,) [m^2 or m^3].
+        spread: root mean square distance of the ends of the pieces from the anchor, shape (k,) [m].
+        normals: planes of both bodies of each overlap, zero for padding, shape (k, p, d).
+        offsets: offsets of those planes relative to the reference point, positive for padding, shape (k, p) [m].
 
     Returns:
-        The area of each region [m^2] and its centroid [m].
+        The centroid of each overlap, in space [m].
     """
     xp = array_module(origin)
-    area = xp.zeros(origin.shape[0])
-    first = xp.zeros_like(origin)
-    for start, end in parts:
-        twice = _cross_2d(start, end).reshape(origin.shape[0], -1)
-        area += 0.5 * twice.sum(axis=1)
-        first += (twice[..., None] * (start + end).reshape(origin.shape[0], -1, 2)).sum(axis=1) / 6.0
-    centroid = origin + first / xp.where(area > 0.0, area, 1.0)[:, None]
-    return xp.maximum(area, 0.0), centroid
+    beyond = xp.max(_dots(normals, anchor + offset) - offsets, axis=1)
+    trusted = (measure > 0.0) & (beyond <= CENTROID_TOLERANCE * spread)
+    return xp.asarray(origin + anchor + xp.where(trusted[:, None], offset, 0.0))
+
+
+def _planar_overlap(origin: npt.NDArray[np.float64], parts: List[_Parts], normals: npt.NDArray[np.float64],
+                    offsets: npt.NDArray[np.float64]) -> Tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
+    """Area and centroid of planar overlaps from the counter-clockwise pieces of their boundaries.
+
+    Args:
+        origin: reference point of each overlap, against which the pieces and planes are given, shape (k, 2) [m].
+        parts: start and end points of pieces of the boundaries, shape (k, ..., 2) each [m], and whether each piece
+            lies inside the overlap at all, shape (k, ...).
+        normals: lines of both bodies of each overlap, zero for padding, shape (k, p, 2).
+        offsets: offsets of those lines, positive for padding, shape (k, p) [m].
+
+    Returns:
+        The area of each overlap [m^2] and its centroid [m].
+    """
+    xp = array_module(origin)
+    count = origin.shape[0]
+    start = xp.concatenate([part[0].reshape(count, -1, 2) for part in parts], axis=1)
+    end = xp.concatenate([part[1].reshape(count, -1, 2) for part in parts], axis=1)
+    inside = xp.concatenate([part[2].reshape(count, -1) for part in parts], axis=1)
+    # the ends of the pieces lie on the boundary of the convex overlap, so their mean lies inside it
+    ends = 2.0 * inside.sum(axis=1)
+    per_end = 1.0 / xp.where(ends > 0.0, ends, 1.0)
+    anchor = ((start + end) * inside[..., None]).sum(axis=1) * per_end[:, None]
+    # pieces outside the overlap have no length wherever they are moved, so they add nothing below
+    start, end = start - anchor[:, None], end - anchor[:, None]
+    twice = _cross_2d(start, end)
+    area = 0.5 * twice.sum(axis=1)
+    first = (twice[..., None] * (start + end)).sum(axis=1) / 6.0
+    offset = first / xp.where(area > 0.0, area, 1.0)[:, None]
+    squares = (xp.einsum("kpd,kpd->kp", start, start) + xp.einsum("kpd,kpd->kp", end, end)) * inside
+    spread = xp.sqrt(squares.sum(axis=1) * per_end)
+    return xp.maximum(area, 0.0), _checked_centroid(origin, anchor, offset, area, spread, normals, offsets)
 
 
 def polygon_overlap(vertices_i: npt.NDArray[np.float64], normals_i: npt.NDArray[np.float64],
@@ -247,9 +294,10 @@ def polygon_overlap(vertices_i: npt.NDArray[np.float64], normals_i: npt.NDArray[
     vi, vj = vertices_i - origin[:, None], vertices_j - origin[:, None]
     hi = offsets_i - _dots(normals_i, origin)
     hj = offsets_j - _dots(normals_j, origin)
-    start_i, end_i = _segment_parts(vi, normals_j, hj)
-    start_j, end_j = _segment_parts(vj, normals_i, hi)
-    area, centroid = _planar_overlap(origin, [(start_i, end_i), (start_j, end_j)])
+    start_i, end_i, inside_i = _segment_parts(vi, normals_j, hj)
+    start_j, end_j, inside_j = _segment_parts(vj, normals_i, hi)
+    area, centroid = _planar_overlap(origin, [(start_i, end_i, inside_i), (start_j, end_j, inside_j)],
+                                     xp.concatenate((normals_i, normals_j), axis=1), xp.concatenate((hi, hj), axis=1))
     # the outward normal of a counter-clockwise edge is the edge turned clockwise; both outlines give the chord
     chord_j, chord_i = (end_j - start_j).sum(axis=1), (end_i - start_i).sum(axis=1)
     surface = 0.5 * xp.column_stack((chord_j[:, 1] - chord_i[:, 1], chord_i[:, 0] - chord_j[:, 0]))
@@ -295,10 +343,10 @@ def polygon_region_overlap(vertices: npt.NDArray[np.float64], normals: npt.NDArr
         inside &= xp.isfinite(t0) & xp.isfinite(t1)
         start = xp.where(inside[:, None], hr[:, r, None] * normal + t0[:, None] * direction, 0.0)
         end = xp.where(inside[:, None], hr[:, r, None] * normal + t1[:, None] * direction, 0.0)
-        parts.append((start, end))
+        parts.append((start, end, inside))
         if r == 0:
             cap = xp.where(inside, t1 - t0, 0.0)
-    area, centroid = _planar_overlap(origin, parts)
+    area, centroid = _planar_overlap(origin, parts, planes, planes_offsets)
     return Overlap(area, centroid, cap[:, None] * region_normals[:, 0])
 
 
@@ -356,14 +404,15 @@ def _line_pieces(pair: npt.NDArray[np.int64], first: npt.NDArray[np.int64], seco
     xp = array_module(normals)
     na, nb = normals[pair, first], normals[pair, second]
     ha, hb = offsets[pair, first], offsets[pair, second]
-    cosine = xp.einsum("ij,ij->i", na, nb)
-    sine_sq = 1.0 - cosine * cosine
+    # the squared sine from the cross product keeps its accuracy for nearly parallel planes and for nearly opposite
+    # ones, as two faces lying on each other are, where 1 - cos^2 loses it to the rounding of the cosine
+    direction = cross_3d(na, nb)
+    sine_sq = xp.einsum("ij,ij->i", direction, direction)
     meet = sine_sq > PARALLEL_PLANES_TOLERANCE
     pair, first, second = pair[meet], first[meet], second[meet]
-    na, nb, ha, hb, cosine, sine_sq = na[meet], nb[meet], ha[meet], hb[meet], cosine[meet], sine_sq[meet]
-    # the point of the line closest to the reference point is a combination of the two normals
-    origin = (((ha - hb * cosine) / sine_sq)[:, None] * na + ((hb - ha * cosine) / sine_sq)[:, None] * nb)
-    direction = cross_3d(na, nb)
+    na, nb, ha, hb, direction, sine_sq = na[meet], nb[meet], ha[meet], hb[meet], direction[meet], sine_sq[meet]
+    # the point of the line closest to the reference point
+    origin = (ha[:, None] * cross_3d(nb, direction) + hb[:, None] * cross_3d(direction, na)) / sine_sq[:, None]
     clip_normals, clip_offsets = normals[pair], offsets[pair]
     line = xp.arange(pair.size)
     # the line lies on its own two planes, which must not clip it
@@ -407,14 +456,15 @@ def _solid_overlap(count: int, origin: npt.NDArray[np.float64], normals: npt.NDA
                    surface_planes: npt.NDArray[np.bool_]) -> Overlap:
     """Volume, centroid and contact surface of overlaps from the pieces of their boundaries.
 
-    The piece from p to q on the plane n . x = h, relative to the reference point, spans with the foot h n of the
-    reference point on that plane and the reference point itself a tetrahedron of signed volume h n . (p x q) / 6.
+    The piece from p to q on the plane n . x = h, relative to a point inside the overlap, spans with the foot h n of
+    that point on the plane and the point itself a tetrahedron of signed volume h n . (p x q) / 6. The point is the
+    mean of the ends of the pieces of the overlap.
 
     Args:
         count: number of contacts.
         origin: reference point of each contact, against which everything is given, shape (count, 3) [m].
-        normals: planes of both bodies of each contact, shape (count, p, 3).
-        offsets: offsets of those planes, shape (count, p) [m].
+        normals: planes of both bodies of each contact, zero for padding, shape (count, p, 3).
+        offsets: offsets of those planes, positive for padding, shape (count, p) [m].
         pieces: pieces of the boundaries, each counter-clockwise about the outward normal of its plane.
         surface_planes: planes whose pieces make up the contact surface, shape (p,).
 
@@ -426,15 +476,28 @@ def _solid_overlap(count: int, origin: npt.NDArray[np.float64], normals: npt.NDA
     p = xp.concatenate([piece[1] for piece in pieces])
     q = xp.concatenate([piece[2] for piece in pieces])
     plane = xp.concatenate([piece[3] for piece in pieces])
+    # the ends of the pieces lie on the boundary of the convex overlap, so their mean lies inside it; one sum, which
+    # a GPU makes with a sort, gives their total and their number
+    ends = scatter_add(pair, xp.column_stack((p + q, xp.ones(pair.size))), count)
+    per_end = 0.5 / xp.where(ends[:, 3] > 0.0, ends[:, 3], 1.0)
+    anchor = ends[:, :3] * per_end[:, None]
+    # tetrahedra spanned from inside the overlap are of its size, not of the bodies', so their rounding stays small
+    # against the volume of a thin overlap
+    p, q = p - anchor[pair], q - anchor[pair]
     normal = normals[pair, plane]
-    height = offsets[pair, plane]
+    height = offsets[pair, plane] - xp.einsum("ij,ij->i", normal, anchor[pair])
     moment = cross_3d(p, q)
     volume = height * xp.einsum("ij,ij->i", normal, moment) / 6.0
-    measure = scatter_add(pair, volume, count)
-    first = scatter_add(pair, volume[:, None] * (height[:, None] * normal + p + q) / 4.0, count)
+    squares = xp.einsum("ij,ij->i", p, p) + xp.einsum("ij,ij->i", q, q)
+    totals = scatter_add(pair,
+                         xp.column_stack((volume, volume[:, None] * (height[:, None] * normal + p + q) / 4.0, squares)),
+                         count)
+    measure, first = totals[:, 0], totals[:, 1:4]
     on_surface = surface_planes[plane]
     surface = scatter_add(pair[on_surface], 0.5 * moment[on_surface], count)
-    centroid = origin + first / xp.where(measure > 0.0, measure, 1.0)[:, None]
+    offset = first / xp.where(measure > 0.0, measure, 1.0)[:, None]
+    spread = xp.sqrt(totals[:, 4] * per_end)
+    centroid = _checked_centroid(origin, anchor, offset, measure, spread, normals, offsets)
     return Overlap(xp.maximum(measure, 0.0), centroid, surface)
 
 

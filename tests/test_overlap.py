@@ -7,6 +7,7 @@ import numpy as np
 import numpy.typing as npt
 from numpy.testing import assert_allclose
 
+from DEMcookies.globals import OVERLAP_TIE_BREAK
 from DEMcookies.overlap import (Polyhedra, clip_lines, polygon_distance, polygon_overlap, polygon_region_overlap,
                                 polyhedron_distance, polyhedron_overlap, polyhedron_region_overlap)
 from DEMcookies.polytopes import PolytopeTable, place
@@ -42,6 +43,31 @@ def _squares(centres: npt.ArrayLike,
 def _quaternion_about_z(angle: float) -> Tuple[float, float, float, float]:
     """Return the quaternion of a rotation about the z axis."""
     return (math.cos(0.5 * angle), 0.0, 0.0, math.sin(0.5 * angle))
+
+
+def _grazing_orientations(rng: np.random.Generator, count: int) -> npt.NDArray[np.float64]:
+    """Return quaternions of a turn about y followed by a tilt of 1e-8 to 1e-2 rad about a random horizontal axis."""
+    tilt = 10.0**rng.uniform(-8.0, -2.0, count)
+    axis = rng.uniform(0.0, 2.0 * math.pi, count)
+    turn = rng.uniform(0.0, math.pi, count)
+    w_turn, y_turn = np.cos(0.5 * turn), np.sin(0.5 * turn)
+    w_tilt, x_tilt, z_tilt = np.cos(0.5 * tilt), np.sin(0.5 * tilt) * np.cos(axis), np.sin(0.5 * tilt) * np.sin(axis)
+    return np.column_stack(
+        (w_turn * w_tilt, w_turn * x_tilt + y_turn * z_tilt, y_turn * w_tilt, w_turn * z_tilt - y_turn * x_tilt))
+
+
+def _sink(vertices: npt.NDArray[np.float64], normals: npt.NDArray[np.float64], offsets: npt.NDArray[np.float64],
+          level: float, depths: npt.NDArray[np.float64]) -> None:
+    """Move bodies along y, in place, so that the lowest vertex of each lies a depth below a level."""
+    shift = level - depths - vertices[..., 1].min(axis=1)
+    vertices[..., 1] += shift[:, None]
+    offsets += normals[..., 1] * shift[:, None]
+
+
+def _beyond(normals: npt.NDArray[np.float64], offsets: npt.NDArray[np.float64],
+            points: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """Return how far each point lies beyond the planes of its convex body, negative inside."""
+    return np.asarray(np.max(np.einsum("kpd,kd->kp", normals, points) - offsets, axis=1))
 
 
 class TestClipLines:
@@ -136,6 +162,40 @@ class TestPolygonOverlap:
         assert_allclose(overlap.measure, [0.6 * 0.05])
         assert_allclose(overlap.surface, [[0.0, 0.6]], atol=1e-15)
 
+    def test_grazing_squares_keep_the_centroid_inside(self) -> None:
+        """A corner or a nearly flat edge that grazes another square must give a centroid inside both squares.
+
+        The overlap is then thin, and rounding used to throw its centroid, the contact point, far outside them.
+        """
+        rng = np.random.default_rng(2)
+        count = 300
+        tilts = 10.0**rng.uniform(-8.0, -2.0, count) * rng.choice([-1.0, 1.0], count)
+        vertices, normals, offsets = _squares(np.column_stack((rng.uniform(-0.4, 0.4, count), np.ones(count))), tilts)
+        _sink(vertices, normals, offsets, 0.5, 10.0**rng.uniform(-15.0, -7.0, count))
+        lower_vertices, lower_normals, lower_offsets = _squares(np.zeros((count, 2)), np.zeros(count))
+        overlap = polygon_overlap(vertices, normals, offsets, lower_vertices, lower_normals, lower_offsets)
+        touching = overlap.measure > 0.0
+        beyond = np.maximum(_beyond(normals, offsets, overlap.centroid),
+                            _beyond(lower_normals, lower_offsets, overlap.centroid))
+        assert touching.sum() > count // 4
+        assert np.all(beyond[touching] < 1e-8)
+
+    def test_square_grazing_a_floor_keeps_the_centroid_inside(self) -> None:
+        """A corner or a nearly flat edge that grazes a floor must give a centroid inside the square and the region."""
+        rng = np.random.default_rng(3)
+        count = 300
+        tilts = 10.0**rng.uniform(-8.0, -2.0, count) * rng.choice([-1.0, 1.0], count)
+        vertices, normals, offsets = _squares(np.column_stack((rng.uniform(-1.0, 1.0, count), np.ones(count))), tilts)
+        _sink(vertices, normals, offsets, 0.0, 10.0**rng.uniform(-15.0, -7.0, count))
+        region_normals = np.tile([[0.0, 1.0], [-1.0, 0.0], [1.0, 0.0]], (count, 1, 1))
+        region_offsets = np.tile([0.0, 3.0, 3.0], (count, 1))
+        overlap = polygon_region_overlap(vertices, normals, offsets, region_normals, region_offsets)
+        touching = overlap.measure > 0.0
+        beyond = np.maximum(_beyond(normals, offsets, overlap.centroid),
+                            _beyond(region_normals, region_offsets, overlap.centroid))
+        assert touching.sum() > count // 4
+        assert np.all(beyond[touching] < 1e-8)
+
 
 class TestPolyhedronOverlap:
     """Tests of polyhedron_overlap and polyhedron_region_overlap."""
@@ -218,6 +278,61 @@ class TestPolyhedronOverlap:
         volume = 0.5 * 0.1 + 0.5 * 0.1 * 0.1
         assert_allclose(overlap.measure, [volume])
         assert_allclose(overlap.surface, [[0.0, 0.5, 0.0]], atol=1e-14)
+
+    def test_grazing_cubes_keep_the_centroid_inside(self) -> None:
+        """A corner or a nearly flat face that grazes another cube must give a centroid inside both cubes.
+
+        The overlap is then thin, and rounding used to throw its centroid, the contact point, far outside them.
+        """
+        rng = np.random.default_rng(0)
+        count = 300
+        centres = np.column_stack((rng.uniform(-0.4, 0.4, count), np.ones(count), rng.uniform(-0.4, 0.4, count)))
+        upper = _cubes(centres, _grazing_orientations(rng, count))
+        _sink(upper.vertices, upper.normals, upper.offsets, 0.5, 10.0**rng.uniform(-15.0, -7.0, count))
+        lower = _cubes(np.zeros((count, 3)), [(1.0, 0.0, 0.0, 0.0)] * count)
+        overlap = polyhedron_overlap(upper, lower)
+        touching = overlap.measure > 0.0
+        beyond = np.maximum(_beyond(upper.normals, upper.offsets, overlap.centroid),
+                            _beyond(lower.normals, lower.offsets, overlap.centroid))
+        assert touching.sum() > count // 4
+        assert np.all(beyond[touching] < 1e-8)
+
+    def test_nearly_opposite_faces_meet_where_they_cross(self) -> None:
+        """A small cube tilted by 2e-6 rad whose lowest edge sinks 1e-8 into a unit cube must overlap in a thin wedge.
+
+        The bottom of the small cube and the top of the unit cube are then nearly opposite planes, whose line of
+        meeting bounds the wedge.
+        """
+        tilt, depth, side = 2.0e-6, 1.0e-8, 0.5
+        half = 0.5 * side
+        centre = [0.1, 0.5 - depth + half * (math.cos(tilt) + math.sin(tilt)), -0.2]
+        upper = _cubes([centre], [(math.cos(0.5 * tilt), math.sin(0.5 * tilt), 0.0, 0.0)], side)
+        overlap = polyhedron_overlap(upper, _cubes([[0.0, 0.0, 0.0]], [(1.0, 0.0, 0.0, 0.0)]))
+        # the second body is grown about its centre to break ties, which raises its top by half the growth
+        top = 0.5 * (1.0 + OVERLAP_TIE_BREAK)
+        sunk = top - (0.5 - depth)
+        width = sunk / math.tan(tilt)
+        edge = centre[2] + half * (math.cos(tilt) - math.sin(tilt))
+        assert_allclose(overlap.measure, [0.5 * side * sunk * width], rtol=1e-6)
+        assert_allclose(overlap.centroid, [[centre[0], top - sunk / 3.0, edge - width / 3.0]], atol=1e-9)
+        assert_allclose(overlap.surface, [[0.0, side * width, 0.0]], rtol=1e-6, atol=1e-12)
+
+    def test_cube_grazing_a_floor_keeps_the_centroid_inside(self) -> None:
+        """A corner or a nearly flat face that grazes a floor must give a centroid inside the cube and the region."""
+        rng = np.random.default_rng(1)
+        count = 300
+        centres = np.column_stack((rng.uniform(-1.0, 1.0, count), np.ones(count), rng.uniform(-1.0, 1.0, count)))
+        cubes = _cubes(centres, _grazing_orientations(rng, count))
+        _sink(cubes.vertices, cubes.normals, cubes.offsets, 0.0, 10.0**rng.uniform(-15.0, -7.0, count))
+        planes = [[0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 0.0, 1.0]]
+        region_normals = np.tile(planes, (count, 1, 1))
+        region_offsets = np.tile([0.0, 3.0, 3.0, 3.0, 3.0], (count, 1))
+        overlap = polyhedron_region_overlap(cubes, region_normals, region_offsets)
+        touching = overlap.measure > 0.0
+        beyond = np.maximum(_beyond(cubes.normals, cubes.offsets, overlap.centroid),
+                            _beyond(region_normals, region_offsets, overlap.centroid))
+        assert touching.sum() > count // 4
+        assert np.all(beyond[touching] < 1e-8)
 
 
 class TestDistances:
